@@ -31,6 +31,12 @@
 #include "avc_ss.h"
 #include "classmap.h"
 
+// [ SEC_SELINUX_PORTING_COMMON
+#ifdef SEC_SELINUX_DEBUG
+#include <linux/signal.h>
+#endif
+// ] SEC_SELINUX_PORTING_COMMON
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/avc.h>
 
@@ -43,6 +49,9 @@
 #else
 #define avc_cache_stats_incr(field)	do {} while (0)
 #endif
+
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/avc.h>
 
 struct avc_entry {
 	u32			ssid;
@@ -441,6 +450,7 @@ static void avc_node_free(struct rcu_head *rhead)
 
 static void avc_node_delete(struct selinux_avc *avc, struct avc_node *node)
 {
+	trace_android_rvh_selinux_avc_node_delete(node);
 	hlist_del_rcu(&node->list);
 	call_rcu(&node->rhead, avc_node_free);
 	atomic_dec(&avc->avc_cache.active_nodes);
@@ -457,6 +467,7 @@ static void avc_node_kill(struct selinux_avc *avc, struct avc_node *node)
 static void avc_node_replace(struct selinux_avc *avc,
 			     struct avc_node *new, struct avc_node *old)
 {
+	trace_android_rvh_selinux_avc_node_replace(old, new);
 	hlist_replace_rcu(&old->list, &new->list);
 	call_rcu(&old->rhead, avc_node_free);
 	atomic_dec(&avc->avc_cache.active_nodes);
@@ -565,8 +576,10 @@ static struct avc_node *avc_lookup(struct selinux_avc *avc,
 	avc_cache_stats_incr(lookups);
 	node = avc_search_node(avc, ssid, tsid, tclass);
 
-	if (node)
+	if (node) {
+		trace_android_rvh_selinux_avc_lookup(node, ssid, tsid, tclass);
 		return node;
+	}
 
 	avc_cache_stats_incr(misses);
 	return NULL;
@@ -650,6 +663,7 @@ static struct avc_node *avc_insert(struct selinux_avc *avc,
 		}
 	}
 	hlist_add_head_rcu(&node->list, head);
+	trace_android_rvh_selinux_avc_insert(node);
 found:
 	spin_unlock_irqrestore(lock, flag);
 	return node;
@@ -1009,6 +1023,56 @@ static noinline int avc_denied(struct selinux_state *state,
 {
 	if (flags & AVC_STRICT)
 		return -EACCES;
+
+// [ SEC_SELINUX_PORTING_COMMON
+#ifdef SEC_SELINUX_DEBUG
+	if ((requested & avd->auditallow) && !(avd->flags & AVD_FLAGS_PERMISSIVE)) {
+			char *scontext, *tcontext;
+			const char **perms;
+			int i, perm;
+			int rc1, rc2;
+			u32 scontext_len, tcontext_len;
+	
+			perms = secclass_map[tclass-1].perms;
+			i = 0;
+			perm = 1;
+			while (i < (sizeof(requested) * 8)) {
+				if ((perm & requested) && perms[i])
+					break;
+				i++;
+				perm <<= 1;
+			}
+	
+			rc1 = security_sid_to_context(state, ssid, &scontext, &scontext_len);
+			rc2 = security_sid_to_context(state, tsid, &tcontext, &tcontext_len);
+	
+			if (rc1 || rc2) {
+				pr_err("SELinux DEBUG : %s: ssid=%d tsid=%d tclass=%s perm=%s requested(%d) auditallow(%d)\n",
+			       __func__, ssid, tsid, secclass_map[tclass-1].name, perms[i], requested, avd->auditallow);
+			} else {
+				pr_err("SELinux DEBUG : %s: scontext=%s tcontext=%s tclass=%s perm=%s requested(%d) auditallow(%d)\n",
+			       __func__, scontext, tcontext, secclass_map[tclass-1].name, perms[i], requested, avd->auditallow);
+			}
+
+    		/* print call stack */
+    		pr_err("SELinux DEBUG : FATAL denial and start dump_stack\n");
+	    	dump_stack();
+
+		    /* enforcing : SIGABRT and take debuggerd log */
+            if (!(avd->flags & AVD_FLAGS_PERMISSIVE)) {
+			    pr_err("SELinux DEBUG : send SIGABRT to current tsk\n");
+			    send_sig(SIGABRT, current, 2);
+		    }
+
+		    if (!rc1)
+			    kfree(scontext);
+	        if (!rc2)
+			    kfree(tcontext);
+
+	}
+#endif
+// ] SEC_SELINUX_PORTING_COMMON
+
 
 	if (enforcing_enabled(state) &&
 	    !(avd->flags & AVD_FLAGS_PERMISSIVE))

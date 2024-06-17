@@ -98,10 +98,6 @@ cpu_enable_trap_ctr_access(const struct arm64_cpu_capabilities *cap)
 	    (arm64_ftr_reg_ctrel0.sys_val & mask))
 		enable_uct_trap = true;
 
-	/* ... or if the system is affected by an erratum */
-	if (cap->capability == ARM64_WORKAROUND_1542419)
-		enable_uct_trap = true;
-
 	if (enable_uct_trap)
 		sysreg_clear_set(sctlr_el1, SCTLR_EL1_UCT, 0);
 }
@@ -182,18 +178,6 @@ needs_tx2_tvm_workaround(const struct arm64_cpu_capabilities *entry,
 	return false;
 }
 
-static bool __maybe_unused
-has_neoverse_n1_erratum_1542419(const struct arm64_cpu_capabilities *entry,
-				int scope)
-{
-	u32 midr = read_cpuid_id();
-	bool has_dic = read_cpuid_cachetype() & BIT(CTR_DIC_SHIFT);
-	const struct midr_range range = MIDR_ALL_VERSIONS(MIDR_NEOVERSE_N1);
-
-	WARN_ON(scope != SCOPE_LOCAL_CPU || preemptible());
-	return is_midr_in_range(midr, &range) && has_dic;
-}
-
 #ifdef CONFIG_ARM64_WORKAROUND_REPEAT_TLBI
 static const struct arm64_cpu_capabilities arm64_repeat_tlbi_list[] = {
 #ifdef CONFIG_QCOM_FALKOR_ERRATUM_1009
@@ -225,28 +209,6 @@ static const struct arm64_cpu_capabilities arm64_repeat_tlbi_list[] = {
 		ERRATA_MIDR_RANGE(MIDR_CORTEX_A510, 0, 0, 1, 1),
 	},
 #endif
-	{},
-};
-#endif
-
-#ifdef CONFIG_CAVIUM_ERRATUM_27456
-const struct midr_range cavium_erratum_27456_cpus[] = {
-	/* Cavium ThunderX, T88 pass 1.x - 2.1 */
-	MIDR_RANGE(MIDR_THUNDERX, 0, 0, 1, 1),
-	/* Cavium ThunderX, T81 pass 1.0 */
-	MIDR_REV(MIDR_THUNDERX_81XX, 0, 0),
-	{},
-};
-#endif
-
-#ifdef CONFIG_CAVIUM_ERRATUM_30115
-static const struct midr_range cavium_erratum_30115_cpus[] = {
-	/* Cavium ThunderX, T88 pass 1.x - 2.2 */
-	MIDR_RANGE(MIDR_THUNDERX, 0, 0, 1, 2),
-	/* Cavium ThunderX, T81 pass 1.0 - 1.2 */
-	MIDR_REV_RANGE(MIDR_THUNDERX_81XX, 0, 0, 2),
-	/* Cavium ThunderX, T83 pass 1.0 */
-	MIDR_REV(MIDR_THUNDERX_83XX, 0, 0),
 	{},
 };
 #endif
@@ -355,14 +317,6 @@ static const struct midr_range erratum_1463225[] = {
 };
 #endif
 
-#ifdef CONFIG_ARM64_ERRATUM_1742098
-static struct midr_range broken_aarch32_aes[] = {
-	MIDR_RANGE(MIDR_CORTEX_A57, 0, 1, 0xf, 0xf),
-	MIDR_ALL_VERSIONS(MIDR_CORTEX_A72),
-	{},
-};
-#endif
-
 #ifdef CONFIG_ARM64_WORKAROUND_TRBE_OVERWRITE_FILL_MODE
 static const struct midr_range trbe_overwrite_fill_mode_cpus[] = {
 #ifdef CONFIG_ARM64_ERRATUM_2139208
@@ -374,6 +328,30 @@ static const struct midr_range trbe_overwrite_fill_mode_cpus[] = {
 	{},
 };
 #endif	/* CONFIG_ARM64_WORKAROUND_TRBE_OVERWRITE_FILL_MODE */
+
+#ifdef CONFIG_ARM64_WORKAROUND_TSB_FLUSH_FAILURE
+static const struct midr_range tsb_flush_fail_cpus[] = {
+#ifdef CONFIG_ARM64_ERRATUM_2067961
+	MIDR_ALL_VERSIONS(MIDR_NEOVERSE_N2),
+#endif
+#ifdef CONFIG_ARM64_ERRATUM_2054223
+	MIDR_ALL_VERSIONS(MIDR_CORTEX_A710),
+#endif
+	{},
+};
+#endif	/* CONFIG_ARM64_WORKAROUND_TSB_FLUSH_FAILURE */
+
+#ifdef CONFIG_ARM64_WORKAROUND_TRBE_WRITE_OUT_OF_RANGE
+static struct midr_range trbe_write_out_of_range_cpus[] = {
+#ifdef CONFIG_ARM64_ERRATUM_2253138
+	MIDR_ALL_VERSIONS(MIDR_NEOVERSE_N2),
+#endif
+#ifdef CONFIG_ARM64_ERRATUM_2224489
+	MIDR_ALL_VERSIONS(MIDR_CORTEX_A710),
+#endif
+	{},
+};
+#endif /* CONFIG_ARM64_WORKAROUND_TRBE_WRITE_OUT_OF_RANGE */
 
 const struct arm64_cpu_capabilities arm64_errata[] = {
 #ifdef CONFIG_ARM64_WORKAROUND_CLEAN_CACHE
@@ -426,20 +404,6 @@ const struct arm64_cpu_capabilities arm64_errata[] = {
 		.desc = "Cavium erratum 23154",
 		.capability = ARM64_WORKAROUND_CAVIUM_23154,
 		ERRATA_MIDR_REV_RANGE(MIDR_THUNDERX, 0, 0, 1),
-	},
-#endif
-#ifdef CONFIG_CAVIUM_ERRATUM_27456
-	{
-		.desc = "Cavium erratum 27456",
-		.capability = ARM64_WORKAROUND_CAVIUM_27456,
-		ERRATA_MIDR_RANGE_LIST(cavium_erratum_27456_cpus),
-	},
-#endif
-#ifdef CONFIG_CAVIUM_ERRATUM_30115
-	{
-		.desc = "Cavium erratum 30115",
-		.capability = ARM64_WORKAROUND_CAVIUM_30115,
-		ERRATA_MIDR_RANGE_LIST(cavium_erratum_30115_cpus),
 	},
 #endif
 	{
@@ -535,29 +499,6 @@ const struct arm64_cpu_capabilities arm64_errata[] = {
 		.midr_range_list = erratum_1463225,
 	},
 #endif
-#ifdef CONFIG_CAVIUM_TX2_ERRATUM_219
-	{
-		.desc = "Cavium ThunderX2 erratum 219 (KVM guest sysreg trapping)",
-		.capability = ARM64_WORKAROUND_CAVIUM_TX2_219_TVM,
-		ERRATA_MIDR_RANGE_LIST(tx2_family_cpus),
-		.matches = needs_tx2_tvm_workaround,
-	},
-	{
-		.desc = "Cavium ThunderX2 erratum 219 (PRFM removal)",
-		.capability = ARM64_WORKAROUND_CAVIUM_TX2_219_PRFM,
-		ERRATA_MIDR_RANGE_LIST(tx2_family_cpus),
-	},
-#endif
-#ifdef CONFIG_ARM64_ERRATUM_1542419
-	{
-		/* we depend on the firmware portion for correctness */
-		.desc = "ARM erratum 1542419 (kernel portion)",
-		.capability = ARM64_WORKAROUND_1542419,
-		.type = ARM64_CPUCAP_LOCAL_CPU_ERRATUM,
-		.matches = has_neoverse_n1_erratum_1542419,
-		.cpu_enable = cpu_enable_trap_ctr_access,
-	},
-#endif
 #ifdef CONFIG_ARM64_ERRATUM_1508412
 	{
 		/* we depend on the firmware portion for correctness */
@@ -576,24 +517,6 @@ const struct arm64_cpu_capabilities arm64_errata[] = {
 		ERRATA_MIDR_ALL_VERSIONS(MIDR_NVIDIA_CARMEL),
 	},
 #endif
-
-#ifdef CONFIG_ARM64_ERRATUM_2457168
-	{
-		.desc = "ARM erratum 2457168",
-		.capability = ARM64_WORKAROUND_2457168,
-		.type = ARM64_CPUCAP_WEAK_LOCAL_CPU_FEATURE,
-		/* Cortex-A510 r0p0-r1p1 */
-		CAP_MIDR_RANGE(MIDR_CORTEX_A510, 0, 0, 1, 1)
-	},
-#endif
-#ifdef CONFIG_ARM64_ERRATUM_1742098
-	{
-		.desc = "ARM erratum 1742098",
-		.capability = ARM64_WORKAROUND_1742098,
-		CAP_MIDR_RANGE_LIST(broken_aarch32_aes),
-		.type = ARM64_CPUCAP_LOCAL_CPU_ERRATUM,
-	},
-#endif
 #ifdef CONFIG_ARM64_WORKAROUND_TRBE_OVERWRITE_FILL_MODE
 	{
 		/*
@@ -605,6 +528,30 @@ const struct arm64_cpu_capabilities arm64_errata[] = {
 		.capability = ARM64_WORKAROUND_TRBE_OVERWRITE_FILL_MODE,
 		.type = ARM64_CPUCAP_WEAK_LOCAL_CPU_FEATURE,
 		CAP_MIDR_RANGE_LIST(trbe_overwrite_fill_mode_cpus),
+	},
+#endif
+#ifdef CONFIG_ARM64_WORKAROUND_TSB_FLUSH_FAILURE
+	{
+		.desc = "ARM erratum 2067961 or 2054223",
+		.capability = ARM64_WORKAROUND_TSB_FLUSH_FAILURE,
+		ERRATA_MIDR_RANGE_LIST(tsb_flush_fail_cpus),
+	},
+#endif
+#ifdef CONFIG_ARM64_WORKAROUND_TRBE_WRITE_OUT_OF_RANGE
+	{
+		.desc = "ARM erratum 2253138 or 2224489",
+		.capability = ARM64_WORKAROUND_TRBE_WRITE_OUT_OF_RANGE,
+		.type = ARM64_CPUCAP_WEAK_LOCAL_CPU_FEATURE,
+		CAP_MIDR_RANGE_LIST(trbe_write_out_of_range_cpus),
+	},
+#endif
+#ifdef CONFIG_ARM64_ERRATUM_2457168
+	{
+		.desc = "ARM erratum 2457168",
+		.capability = ARM64_WORKAROUND_2457168,
+		.type = ARM64_CPUCAP_WEAK_LOCAL_CPU_FEATURE,
+		/* Cortex-A510 r0p0-r1p1 */
+		CAP_MIDR_RANGE(MIDR_CORTEX_A510, 0, 0, 1, 1)
 	},
 #endif
 	{

@@ -876,7 +876,7 @@ static int soc_dai_link_sanity_check(struct snd_soc_card *card,
 		 * component list.
 		 */
 		if (!soc_find_component(codec)) {
-			dev_dbg(card->dev,
+			dev_err(card->dev,
 				"ASoC: codec component %s not found for link %s\n",
 				codec->name, link->name);
 			return -EPROBE_DEFER;
@@ -901,7 +901,7 @@ static int soc_dai_link_sanity_check(struct snd_soc_card *card,
 		 * component list.
 		 */
 		if (!soc_find_component(platform)) {
-			dev_dbg(card->dev,
+			dev_err(card->dev,
 				"ASoC: platform component %s not found for link %s\n",
 				platform->name, link->name);
 			return -EPROBE_DEFER;
@@ -927,7 +927,7 @@ static int soc_dai_link_sanity_check(struct snd_soc_card *card,
 		 */
 		if ((cpu->of_node || cpu->name) &&
 		    !soc_find_component(cpu)) {
-			dev_dbg(card->dev,
+			dev_err(card->dev,
 				"ASoC: cpu component %s not found for link %s\n",
 				cpu->name, link->name);
 			return -EPROBE_DEFER;
@@ -2339,6 +2339,7 @@ int snd_soc_register_card(struct snd_soc_card *card)
 	mutex_init(&card->mutex);
 	mutex_init(&card->dapm_mutex);
 	mutex_init(&card->pcm_mutex);
+	spin_lock_init(&card->unused);
 
 	return snd_soc_bind_card(card);
 }
@@ -3196,6 +3197,39 @@ int snd_soc_get_dai_id(struct device_node *ep)
 	return ret;
 }
 EXPORT_SYMBOL_GPL(snd_soc_get_dai_id);
+
+/**
+ * snd_soc_info_multi_ext - external single mixer info callback
+ * @kcontrol: mixer control
+ * @uinfo: control element information
+ *
+ * Callback to provide information about a single external mixer control.
+ * that accepts multiple input.
+ *
+ * Returns 0 for success.
+ */
+int snd_soc_info_multi_ext(struct snd_kcontrol *kcontrol,
+	struct snd_ctl_elem_info *uinfo)
+{
+	struct soc_multi_mixer_control *mc =
+		(struct soc_multi_mixer_control *)kcontrol->private_value;
+	int platform_max;
+
+	if (!mc->platform_max)
+		mc->platform_max = mc->max;
+	platform_max = mc->platform_max;
+
+	if (platform_max == 1 && !strnstr(kcontrol->id.name, " Volume", 30))
+		uinfo->type = SNDRV_CTL_ELEM_TYPE_BOOLEAN;
+	else
+		uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+
+	uinfo->count = mc->count;
+	uinfo->value.integer.min = 0;
+	uinfo->value.integer.max = platform_max;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(snd_soc_info_multi_ext);
 
 int snd_soc_get_dai_name(const struct of_phandle_args *args,
 				const char **dai_name)

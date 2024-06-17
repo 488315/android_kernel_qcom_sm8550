@@ -21,7 +21,8 @@ void copy_highpage(struct page *to, struct page *from)
 
 	copy_page(kto, kfrom);
 
-	page_kasan_tag_reset(to);
+	if (kasan_hw_tags_enabled())
+		page_kasan_tag_reset(to);
 
 	if (system_supports_mte() && test_bit(PG_mte_tagged, &from->flags)) {
 		set_bit(PG_mte_tagged, &to->flags);

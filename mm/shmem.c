@@ -39,6 +39,7 @@
 #include <linux/frontswap.h>
 #include <linux/fs_parser.h>
 #include <linux/swapfile.h>
+#include <linux/mm_inline.h>
 
 static struct vfsmount *shm_mnt;
 
@@ -748,6 +749,8 @@ next:
 		mapping->nrpages += nr;
 		__mod_lruvec_page_state(page, NR_FILE_PAGES, nr);
 		__mod_lruvec_page_state(page, NR_SHMEM, nr);
+		if (is_gpu_page(page))
+			total_kgsl_shmem_pages_add(nr);
 unlock:
 		xas_unlock_irq(&xas);
 	} while (xas_nomem(&xas, gfp));
@@ -776,7 +779,10 @@ static void shmem_delete_from_page_cache(struct page *page, void *radswap)
 
 	xa_lock_irq(&mapping->i_pages);
 	error = shmem_replace_entry(mapping, page->index, page, radswap);
-	page->mapping = NULL;
+	if (!is_gpu_page(page))
+		page->mapping = NULL;
+	else
+		total_kgsl_shmem_pages_dec();
 	mapping->nrpages--;
 	__dec_lruvec_page_state(page, NR_FILE_PAGES);
 	__dec_lruvec_page_state(page, NR_SHMEM);
@@ -1054,6 +1060,8 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 
 	spin_lock_irq(&info->lock);
 	info->swapped -= nr_swaps_freed;
+	if (is_gpu_mapping(mapping))
+		total_kgsl_reclaimed_pages_sub(nr_swaps_freed);
 	shmem_recalc_inode(inode);
 	spin_unlock_irq(&info->lock);
 }
@@ -1438,6 +1446,8 @@ static int shmem_writepage(struct page *page, struct writeback_control *wbc)
 		spin_lock_irq(&info->lock);
 		shmem_recalc_inode(inode);
 		info->swapped++;
+		if (is_gpu_page(page))
+			total_kgsl_reclaimed_pages_inc();
 		spin_unlock_irq(&info->lock);
 
 		swap_shmem_alloc(swap);
@@ -1777,6 +1787,8 @@ static int shmem_swapin_page(struct inode *inode, pgoff_t index,
 
 	spin_lock_irq(&info->lock);
 	info->swapped--;
+	if (is_gpu_page(page))
+		total_kgsl_reclaimed_pages_dec();
 	shmem_recalc_inode(inode);
 	spin_unlock_irq(&info->lock);
 
@@ -4248,3 +4260,41 @@ struct page *shmem_read_mapping_page_gfp(struct address_space *mapping,
 #endif
 }
 EXPORT_SYMBOL_GPL(shmem_read_mapping_page_gfp);
+
+int reclaim_shmem_address_space(struct address_space *mapping)
+{
+#ifdef CONFIG_SHMEM
+	pgoff_t start = 0;
+	struct page *page;
+	LIST_HEAD(page_list);
+	XA_STATE(xas, &mapping->i_pages, start);
+
+	if (!shmem_mapping(mapping))
+		return -EINVAL;
+
+	lru_add_drain();
+
+	rcu_read_lock();
+	xas_for_each(&xas, page, ULONG_MAX) {
+		if (xas_retry(&xas, page))
+			continue;
+		if (xa_is_value(page))
+			continue;
+		if (isolate_lru_page(page))
+			continue;
+
+		list_add(&page->lru, &page_list);
+
+		if (need_resched()) {
+			xas_pause(&xas);
+			cond_resched_rcu();
+		}
+	}
+	rcu_read_unlock();
+
+	return reclaim_pages(&page_list);
+#else
+	return 0;
+#endif
+}
+EXPORT_SYMBOL_GPL(reclaim_shmem_address_space);

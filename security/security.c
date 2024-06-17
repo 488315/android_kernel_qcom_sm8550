@@ -725,10 +725,18 @@ static int lsm_superblock_alloc(struct super_block *sb)
  *	This is a hook that returns a value.
  */
 
+/*
+ * security_integrity_current() is added,
+
+ * which has a dependency of CONFIG_KDP_CRED.
+ * security_integrity_current is added to check integrity of credential context.
+ * if CONFIG_KDP_CRED is disabled, it will always return 0.
+ */
 #define call_void_hook(FUNC, ...)				\
 	do {							\
 		struct security_hook_list *P;			\
 								\
+		if(security_integrity_current()) break;		\
 		hlist_for_each_entry(P, &security_hook_heads.FUNC, list) \
 			P->hook.FUNC(__VA_ARGS__);		\
 	} while (0)
@@ -738,6 +746,9 @@ static int lsm_superblock_alloc(struct super_block *sb)
 	do {							\
 		struct security_hook_list *P;			\
 								\
+		RC = security_integrity_current();		\
+		if (RC != 0)					\
+			break;					\
 		hlist_for_each_entry(P, &security_hook_heads.FUNC, list) { \
 			RC = P->hook.FUNC(__VA_ARGS__);		\
 			if (RC != 0)				\
@@ -1067,11 +1078,12 @@ void security_inode_free(struct inode *inode)
 }
 
 int security_dentry_init_security(struct dentry *dentry, int mode,
-					const struct qstr *name, void **ctx,
-					u32 *ctxlen)
+				  const struct qstr *name,
+				  const char **xattr_name, void **ctx,
+				  u32 *ctxlen)
 {
 	return call_int_hook(dentry_init_security, -EOPNOTSUPP, dentry, mode,
-				name, ctx, ctxlen);
+				name, xattr_name, ctx, ctxlen);
 }
 EXPORT_SYMBOL(security_dentry_init_security);
 
@@ -1698,8 +1710,17 @@ void security_cred_free(struct cred *cred)
 
 	call_void_hook(cred_free, cred);
 
+#ifdef CONFIG_KDP_CRED
+	if (is_kdp_protect_addr((unsigned long)cred)) {
+		kdp_free_security((unsigned long)cred->security);
+		uh_call(UH_APP_KDP, SELINUX_CRED_FREE, (u64) &cred->security, 0, 0, 0);
+	} else {
+#endif
 	kfree(cred->security);
 	cred->security = NULL;
+#ifdef CONFIG_KDP_CRED
+	}
+#endif
 }
 
 int security_prepare_creds(struct cred *new, const struct cred *old, gfp_t gfp)

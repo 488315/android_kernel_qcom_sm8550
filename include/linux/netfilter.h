@@ -14,6 +14,7 @@
 #include <linux/netfilter_defs.h>
 #include <linux/netdevice.h>
 #include <linux/sockptr.h>
+#include <linux/android_kabi.h>
 #include <net/net_namespace.h>
 
 static inline int NF_DROP_GETERR(int verdict)
@@ -135,11 +136,15 @@ static inline struct nf_hook_ops **nf_hook_entries_get_hook_ops(const struct nf_
 	return (struct nf_hook_ops **)hook_end;
 }
 
+void nf_hook_entry_hookfn_log(const struct nf_hook_entry *entry, struct sk_buff *skb);
+
 static inline int
 nf_hook_entry_hookfn(const struct nf_hook_entry *entry, struct sk_buff *skb,
 		     struct nf_hook_state *state)
 {
-	return entry->hook(entry->priv, skb, state);
+	unsigned int rc = entry->hook(entry->priv, skb, state);
+	nf_hook_entry_hookfn_log(entry, skb);
+	return rc;
 }
 
 static inline void nf_hook_state_init(struct nf_hook_state *p,
@@ -177,6 +182,8 @@ struct nf_sockopt_ops {
 	int (*get)(struct sock *sk, int optval, void __user *user, int *len);
 	/* Use the module struct to lock set/get code in place */
 	struct module *owner;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /* Function to register/unregister hook points. */
@@ -374,6 +381,8 @@ struct nf_nat_hook {
 	unsigned int (*manip_pkt)(struct sk_buff *skb, struct nf_conn *ct,
 				  enum nf_nat_manip_type mtype,
 				  enum ip_conntrack_dir dir);
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 extern struct nf_nat_hook __rcu *nf_nat_hook;
@@ -458,6 +467,8 @@ struct nf_ct_hook {
 	void (*destroy)(struct nf_conntrack *);
 	bool (*get_tuple_skb)(struct nf_conntrack_tuple *,
 			      const struct sk_buff *);
+
+	ANDROID_KABI_RESERVE(1);
 };
 extern struct nf_ct_hook __rcu *nf_ct_hook;
 
@@ -473,6 +484,8 @@ struct nfnl_ct_hook {
 			     u32 portid, u32 report);
 	void (*seq_adjust)(struct sk_buff *skb, struct nf_conn *ct,
 			   enum ip_conntrack_info ctinfo, s32 off);
+
+	ANDROID_KABI_RESERVE(1);
 };
 extern struct nfnl_ct_hook __rcu *nfnl_ct_hook;
 

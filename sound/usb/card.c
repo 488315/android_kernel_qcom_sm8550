@@ -41,6 +41,8 @@
 #include <sound/pcm_params.h>
 #include <sound/initval.h>
 
+#include <trace/hooks/audio_usboffload.h>
+
 #include "usbaudio.h"
 #include "card.h"
 #include "midi.h"
@@ -689,7 +691,7 @@ static bool get_alias_id(struct usb_device *dev, unsigned int *id)
 	return false;
 }
 
-static int check_delayed_register_option(struct snd_usb_audio *chip)
+static bool check_delayed_register_option(struct snd_usb_audio *chip, int iface)
 {
 	int i;
 	unsigned int id, inum;
@@ -698,30 +700,13 @@ static int check_delayed_register_option(struct snd_usb_audio *chip)
 		if (delayed_register[i] &&
 		    sscanf(delayed_register[i], "%x:%x", &id, &inum) == 2 &&
 		    id == chip->usb_id)
-			return inum;
+			return iface < inum;
 	}
 
-	return -1;
+	return false;
 }
 
 static const struct usb_device_id usb_audio_ids[]; /* defined below */
-
-/* look for the last interface that matches with our ids and remember it */
-static void find_last_interface(struct snd_usb_audio *chip)
-{
-	struct usb_host_config *config = chip->dev->actconfig;
-	struct usb_interface *intf;
-	int i;
-
-	if (!config)
-		return;
-	for (i = 0; i < config->desc.bNumInterfaces; i++) {
-		intf = config->interface[i];
-		if (usb_match_id(intf, usb_audio_ids))
-			chip->last_iface = intf->altsetting[0].desc.bInterfaceNumber;
-	}
-	usb_audio_dbg(chip, "Found last interface = %d\n", chip->last_iface);
-}
 
 /* look for the corresponding quirk */
 static const struct snd_usb_audio_quirk *
@@ -739,18 +724,6 @@ get_alias_quirk(struct usb_device *dev, unsigned int id)
 	}
 
 	return NULL;
-}
-
-/* register card if we reach to the last interface or to the specified
- * one given via option
- */
-static int try_to_register_card(struct snd_usb_audio *chip, int ifnum)
-{
-	if (check_delayed_register_option(chip) == ifnum ||
-	    chip->last_iface == ifnum ||
-	    usb_interface_claimed(usb_ifnum_to_if(chip->dev, chip->last_iface)))
-		return snd_card_register(chip->card);
-	return 0;
 }
 
 /*
@@ -775,6 +748,7 @@ static int usb_audio_probe(struct usb_interface *intf,
 	int ifnum;
 	u32 id;
 
+	pr_info("%s : audio probe start!\n",__func__);
 	alts = &intf->altsetting[0];
 	ifnum = get_iface_desc(alts)->bInterfaceNumber;
 	id = USB_ID(le16_to_cpu(dev->descriptor.idVendor),
@@ -789,6 +763,8 @@ static int usb_audio_probe(struct usb_interface *intf,
 	err = snd_usb_apply_boot_quirk(dev, intf, quirk, id);
 	if (err < 0)
 		return err;
+
+	trace_android_vh_audio_usb_offload_vendor_set(intf);
 
 	/*
 	 * found a config.  now register to ALSA
@@ -841,7 +817,6 @@ static int usb_audio_probe(struct usb_interface *intf,
 			err = -ENODEV;
 			goto __error;
 		}
-		find_last_interface(chip);
 	}
 
 	if (chip->num_interfaces >= MAX_CARD_INTERFACES) {
@@ -857,6 +832,8 @@ static int usb_audio_probe(struct usb_interface *intf,
 
 	if (chip->quirk_flags & QUIRK_FLAG_DISABLE_AUTOSUSPEND)
 		usb_disable_autosuspend(interface_to_usbdev(intf));
+
+	trace_android_vh_audio_usb_offload_connect(intf, chip);
 
 	/*
 	 * For devices with more than one control interface, we assume the
@@ -891,9 +868,16 @@ static int usb_audio_probe(struct usb_interface *intf,
 		chip->need_delayed_register = false; /* clear again */
 	}
 
-	err = try_to_register_card(chip, ifnum);
-	if (err < 0)
-		goto __error_no_register;
+	/* we are allowed to call snd_card_register() many times, but first
+	 * check to see if a device needs to skip it or do anything special
+	 */
+	if (!snd_usb_registration_quirk(chip, ifnum) &&
+	    !check_delayed_register_option(chip, ifnum)) {
+		err = snd_card_register(chip->card);
+		if (err < 0)
+			goto __error;
+	}
+	pr_info("%s : card %d is registered.\n", __func__, chip->card->number);
 
 	if (chip->quirk_flags & QUIRK_FLAG_SHARE_MEDIA_DEVICE) {
 		/* don't want to fail when snd_media_device_create() fails */
@@ -912,11 +896,7 @@ static int usb_audio_probe(struct usb_interface *intf,
 	return 0;
 
  __error:
-	/* in the case of error in secondary interface, still try to register */
-	if (chip)
-		try_to_register_card(chip, ifnum);
-
- __error_no_register:
+	pr_info("%s : card probe fail.\n", __func__);
 	if (chip) {
 		/* chip->active is inside the chip->card object,
 		 * decrement before memory is possibly returned.
@@ -942,7 +922,10 @@ static void usb_audio_disconnect(struct usb_interface *intf)
 	if (chip == USB_AUDIO_IFACE_UNUSED)
 		return;
 
+	pr_info("%s : disconnect!\n", __func__);  
 	card = chip->card;
+
+	trace_android_rvh_audio_usb_offload_disconnect(intf);
 
 	mutex_lock(&register_mutex);
 	if (atomic_inc_return(&chip->shutdown) == 1) {
@@ -1029,7 +1012,7 @@ void snd_usb_unlock_shutdown(struct snd_usb_audio *chip)
 int snd_usb_autoresume(struct snd_usb_audio *chip)
 {
 	int i, err;
-
+	pr_info("%s : ++!\n", __func__);
 	if (atomic_read(&chip->shutdown))
 		return -EIO;
 	if (atomic_inc_return(&chip->active) != 1)
@@ -1047,11 +1030,12 @@ int snd_usb_autoresume(struct snd_usb_audio *chip)
 	}
 	return 0;
 }
+EXPORT_SYMBOL_GPL(snd_usb_autoresume);
 
 void snd_usb_autosuspend(struct snd_usb_audio *chip)
 {
 	int i;
-
+	pr_info("%s : --!\n", __func__);
 	if (atomic_read(&chip->shutdown))
 		return;
 	if (!atomic_dec_and_test(&chip->active))
@@ -1060,6 +1044,7 @@ void snd_usb_autosuspend(struct snd_usb_audio *chip)
 	for (i = 0; i < chip->num_interfaces; i++)
 		usb_autopm_put_interface(chip->intf[i]);
 }
+EXPORT_SYMBOL_GPL(snd_usb_autosuspend);
 
 static int usb_audio_suspend(struct usb_interface *intf, pm_message_t message)
 {
@@ -1072,6 +1057,7 @@ static int usb_audio_suspend(struct usb_interface *intf, pm_message_t message)
 	if (chip == USB_AUDIO_IFACE_UNUSED)
 		return 0;
 
+	dev_info(&intf->dev, "suspend\n");
 	if (!chip->num_suspended_intf++) {
 		list_for_each_entry(as, &chip->pcm_list, list)
 			snd_usb_pcm_suspend(as);
@@ -1102,6 +1088,7 @@ static int usb_audio_resume(struct usb_interface *intf)
 	if (chip == USB_AUDIO_IFACE_UNUSED)
 		return 0;
 
+	dev_info(&intf->dev, "resume\n");
 	atomic_inc(&chip->active); /* avoid autopm */
 	if (chip->num_suspended_intf > 1)
 		goto out;

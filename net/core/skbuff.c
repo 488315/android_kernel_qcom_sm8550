@@ -78,6 +78,7 @@
 #include <linux/capability.h>
 #include <linux/user_namespace.h>
 #include <linux/indirect_call_wrapper.h>
+#include <trace/hooks/net.h>
 
 #include "datagram.h"
 #include "sock_destructor.h"
@@ -772,10 +773,25 @@ void kfree_skb_reason(struct sk_buff *skb, enum skb_drop_reason reason)
 	if (!skb_unref(skb))
 		return;
 
+	trace_android_vh_kfree_skb(skb);
 	trace_kfree_skb(skb, __builtin_return_address(0), reason);
 	__kfree_skb(skb);
 }
 EXPORT_SYMBOL(kfree_skb_reason);
+
+/**
+ *	kfree_skb - free an sk_buff with 'NOT_SPECIFIED' reason
+ *	@skb: buffer to free
+ */
+void kfree_skb(struct sk_buff *skb)
+{
+	/* ANDROID: only still present to preserve the ABI, this went away in
+	 * mainline and LTS releases, to be replaced with an inline version
+	 * instead.
+	 */
+	kfree_skb_reason(skb, SKB_DROP_REASON_NOT_SPECIFIED);
+}
+EXPORT_SYMBOL(kfree_skb);
 
 void kfree_skb_list(struct sk_buff *segs)
 {
@@ -1046,9 +1062,64 @@ static void __copy_skb_header(struct sk_buff *new, const struct sk_buff *old)
 #ifdef CONFIG_NET_SCHED
 	CHECK_SKB_FIELD(tc_index);
 #endif
-
+	/* ANDROID:
+	 * Due to attempts to keep the ABI stable for struct sk_buff, the new
+	 * fields were incorrectly added _AFTER_ the headers_end field, which
+	 * requires that we manually copy the fields here from the old to the
+	 * new one.
+	 * Be sure to add any new field that is added in the
+	 * ANDROID_KABI_REPLACE() macros below here as well.
+	 */
+	new->scm_io_uring = old->scm_io_uring;
 }
 
+char __skb_clone_log1[1000][512];
+int __skb_clone_log1_iter = 0;
+
+void __skb_clone_log(struct sk_buff *n, struct sk_buff *skb)
+{
+	struct timespec64 ts;
+
+	ktime_get_ts64(&ts);
+	snprintf(__skb_clone_log1[__skb_clone_log1_iter], 512,
+		"%s():%d %lld.%ld n %llx skb %llx\n",
+		__func__, __LINE__, ts.tv_sec, ts.tv_nsec, (u64)n, (u64)skb);
+	__skb_clone_log1_iter++;
+	if (__skb_clone_log1_iter > 999)
+		__skb_clone_log1_iter = 0;
+
+	{
+		struct sk_buff *frag_iter;
+
+		if (skb->dev && !strstr(skb->dev->name, "rmnet_ipa")) {
+			skb_walk_frags(skb, frag_iter) {
+				if (!skb_headlen(frag_iter) &&
+				(!skb_shinfo(frag_iter)->nr_frags ||
+				skb_shinfo(frag_iter)->frag_list)) {
+					pr_err("%s(): head_skb: 0x%llx\n",
+					__func__, (u64)skb);
+					BUG_ON(1);
+				}
+			}
+		}
+	}
+
+	{
+		struct sk_buff *frag_iter;
+
+		if (n->dev && !strstr(n->dev->name, "rmnet_ipa")) {
+			skb_walk_frags(n, frag_iter) {
+				if (!skb_headlen(frag_iter) &&
+				(!skb_shinfo(frag_iter)->nr_frags ||
+				skb_shinfo(frag_iter)->frag_list)) {
+					pr_err("%s(): head_skb: 0x%llx\n",
+					__func__, (u64)n);
+					BUG_ON(1);
+				}
+			}
+		}
+	}
+}
 /*
  * You should not add any new code to this function.  Add it to
  * __copy_skb_header above instead.
@@ -1082,6 +1153,7 @@ static struct sk_buff *__skb_clone(struct sk_buff *n, struct sk_buff *skb)
 	atomic_inc(&(skb_shinfo(skb)->dataref));
 	skb->cloned = 1;
 
+	__skb_clone_log(n, skb);
 	return n;
 #undef C
 }

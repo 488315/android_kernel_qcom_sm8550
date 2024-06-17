@@ -17,8 +17,6 @@
 struct uart_8250_dma {
 	int (*tx_dma)(struct uart_8250_port *p);
 	int (*rx_dma)(struct uart_8250_port *p);
-	void (*prepare_tx_dma)(struct uart_8250_port *p);
-	void (*prepare_rx_dma)(struct uart_8250_port *p);
 
 	/* Filter function */
 	dma_filter_fn		fn;
@@ -90,6 +88,7 @@ struct serial8250_config {
 #define UART_BUG_TXEN	BIT(1)	/* UART has buggy TX IIR status */
 #define UART_BUG_NOMSR	BIT(2)	/* UART has buggy MSR status bits (Au1x00) */
 #define UART_BUG_THRE	BIT(3)	/* UART has buggy THRE reassertion */
+#define UART_BUG_PARITY	BIT(4)	/* UART mishandles parity if FIFO enabled */
 #define UART_BUG_TXRACE	BIT(5)	/* UART Tx fails to set remote DR */
 
 
@@ -332,22 +331,6 @@ extern int serial8250_rx_dma(struct uart_8250_port *);
 extern void serial8250_rx_dma_flush(struct uart_8250_port *);
 extern int serial8250_request_dma(struct uart_8250_port *);
 extern void serial8250_release_dma(struct uart_8250_port *);
-
-static inline void serial8250_do_prepare_tx_dma(struct uart_8250_port *p)
-{
-	struct uart_8250_dma *dma = p->dma;
-
-	if (dma->prepare_tx_dma)
-		dma->prepare_tx_dma(p);
-}
-
-static inline void serial8250_do_prepare_rx_dma(struct uart_8250_port *p)
-{
-	struct uart_8250_dma *dma = p->dma;
-
-	if (dma->prepare_rx_dma)
-		dma->prepare_rx_dma(p);
-}
 
 static inline bool serial8250_tx_dma_running(struct uart_8250_port *p)
 {

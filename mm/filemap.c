@@ -44,7 +44,12 @@
 #include <linux/page_idle.h>
 #include <asm/pgalloc.h>
 #include <asm/tlbflush.h>
+#include <trace/events/tracing_mark_write.h>
 #include "internal.h"
+
+#ifdef CONFIG_PAGE_BOOST_RECORDING
+#include <linux/io_record.h>
+#endif
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/filemap.h>
@@ -196,6 +201,8 @@ static void unaccount_page_cache_page(struct address_space *mapping,
 	__mod_lruvec_page_state(page, NR_FILE_PAGES, -nr);
 	if (PageSwapBacked(page)) {
 		__mod_lruvec_page_state(page, NR_SHMEM, -nr);
+		if (is_gpu_page(page))
+			total_kgsl_shmem_pages_sub(nr);
 		if (PageTransHuge(page))
 			__mod_lruvec_page_state(page, NR_SHMEM_THPS, -nr);
 	} else if (PageTransHuge(page)) {
@@ -1272,7 +1279,7 @@ static inline bool trylock_page_bit_common(struct page *page, int bit_nr,
 /* How many times do we accept lock stealing from under a waiter? */
 int sysctl_page_lock_unfairness = 5;
 
-static inline int wait_on_page_bit_common(wait_queue_head_t *q,
+static inline __sched int wait_on_page_bit_common(wait_queue_head_t *q,
 	struct page *page, int bit_nr, int state, enum behavior behavior)
 {
 	int unfairness = sysctl_page_lock_unfairness;
@@ -1411,14 +1418,14 @@ repeat:
 	return wait->flags & WQ_FLAG_WOKEN ? 0 : -EINTR;
 }
 
-void wait_on_page_bit(struct page *page, int bit_nr)
+__sched void wait_on_page_bit(struct page *page, int bit_nr)
 {
 	wait_queue_head_t *q = page_waitqueue(page);
 	wait_on_page_bit_common(q, page, bit_nr, TASK_UNINTERRUPTIBLE, SHARED);
 }
 EXPORT_SYMBOL(wait_on_page_bit);
 
-int wait_on_page_bit_killable(struct page *page, int bit_nr)
+__sched int wait_on_page_bit_killable(struct page *page, int bit_nr)
 {
 	wait_queue_head_t *q = page_waitqueue(page);
 	return wait_on_page_bit_common(q, page, bit_nr, TASK_KILLABLE, SHARED);
@@ -1641,7 +1648,7 @@ EXPORT_SYMBOL_GPL(page_endio);
  * __lock_page - get a lock on the page, assuming we need to sleep to get it
  * @__page: the page to lock
  */
-void __lock_page(struct page *__page)
+__sched void __lock_page(struct page *__page)
 {
 	struct page *page = compound_head(__page);
 	wait_queue_head_t *q = page_waitqueue(page);
@@ -1650,7 +1657,7 @@ void __lock_page(struct page *__page)
 }
 EXPORT_SYMBOL(__lock_page);
 
-int __lock_page_killable(struct page *__page)
+__sched int __lock_page_killable(struct page *__page)
 {
 	struct page *page = compound_head(__page);
 	wait_queue_head_t *q = page_waitqueue(page);
@@ -1659,7 +1666,7 @@ int __lock_page_killable(struct page *__page)
 }
 EXPORT_SYMBOL_GPL(__lock_page_killable);
 
-int __lock_page_async(struct page *page, struct wait_page_queue *wait)
+__sched int __lock_page_async(struct page *page, struct wait_page_queue *wait)
 {
 	struct wait_queue_head *q = page_waitqueue(page);
 	int ret = 0;
@@ -1696,7 +1703,7 @@ int __lock_page_async(struct page *page, struct wait_page_queue *wait)
  * If neither ALLOW_RETRY nor KILLABLE are set, will always return 1
  * with the page locked and the mmap_lock unperturbed.
  */
-int __lock_page_or_retry(struct page *page, struct mm_struct *mm,
+__sched int __lock_page_or_retry(struct page *page, struct mm_struct *mm,
 			 unsigned int flags)
 {
 	if (fault_flag_allow_retry_first(flags)) {
@@ -2611,6 +2618,12 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 	int i, error = 0;
 	bool writably_mapped;
 	loff_t isize, end_offset;
+	loff_t last_pos = ra->prev_pos;
+#ifdef CONFIG_PAGE_BOOST_RECORDING
+	pgoff_t index;
+	loff_t *ppos = &iocb->ki_pos;
+	pgoff_t last_index;
+#endif
 
 	if (unlikely(iocb->ki_pos >= inode->i_sb->s_maxbytes))
 		return 0;
@@ -2619,6 +2632,12 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 
 	iov_iter_truncate(iter, inode->i_sb->s_maxbytes);
 	pagevec_init(&pvec);
+
+#ifdef CONFIG_PAGE_BOOST_RECORDING
+	index = *ppos >> PAGE_SHIFT;
+	last_index = (*ppos + iov_iter_count(iter) + PAGE_SIZE-1) >> PAGE_SHIFT;
+	record_io_info(filp, index, last_index - index);
+#endif
 
 	do {
 		cond_resched();
@@ -2659,7 +2678,7 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 		 * mark it as accessed the first time.
 		 */
 		if (iocb->ki_pos >> PAGE_SHIFT !=
-		    ra->prev_pos >> PAGE_SHIFT)
+		    last_pos >> PAGE_SHIFT)
 			mark_page_accessed(pvec.pages[0]);
 
 		for (i = 0; i < pagevec_count(&pvec); i++) {
@@ -2690,7 +2709,7 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 
 			already_read += copied;
 			iocb->ki_pos += copied;
-			ra->prev_pos = iocb->ki_pos;
+			last_pos = iocb->ki_pos;
 
 			if (copied < bytes) {
 				error = -EFAULT;
@@ -2704,7 +2723,7 @@ put_pages:
 	} while (iov_iter_count(iter) && iocb->ki_pos < isize && !error);
 
 	file_accessed(filp);
-
+	ra->prev_pos = last_pos;
 	return already_read ? already_read : error;
 }
 EXPORT_SYMBOL_GPL(filemap_read);
@@ -2935,6 +2954,39 @@ static int lock_page_maybe_drop_mmap(struct vm_fault *vmf, struct page *page,
 	return 1;
 }
 
+#ifdef CONFIG_TRACING
+static void filemap_tracing_mark_begin(struct file *file,
+		pgoff_t offset, unsigned int size, bool sync)
+{
+	char buf[TRACING_MARK_BUF_SIZE], *path;
+
+	if (!trace_tracing_mark_write_enabled())
+		return;
+
+	path = file_path(file, buf, TRACING_MARK_BUF_SIZE);
+	if (IS_ERR(path)) {
+		sprintf(buf, "file_path failed(%ld)", PTR_ERR(path));
+		path = buf;
+	}
+
+	tracing_mark_begin("%d , %s , %lu , %d", sync, path, offset, size);
+}
+
+static void filemap_tracing_mark_end(void)
+{
+	tracing_mark_end();
+}
+#else
+static inline void filemap_tracing_mark_begin(struct file *file,
+		pgoff_t offset, unsigned int size, bool sync) { }
+static inline void filemap_tracing_mark_end(void) { }
+#endif
+
+#if CONFIG_MMAP_READAROUND_LIMIT == 0
+unsigned int mmap_readaround_limit = VM_READAHEAD_PAGES; 		/* page */
+#else
+unsigned int mmap_readaround_limit = CONFIG_MMAP_READAROUND_LIMIT;	/* page */
+#endif
 
 /*
  * Synchronous readahead happens when we don't even find a page in the page
@@ -2951,6 +3003,8 @@ static struct file *do_sync_mmap_readahead(struct vm_fault *vmf)
 	DEFINE_READAHEAD(ractl, file, ra, mapping, vmf->pgoff);
 	struct file *fpin = NULL;
 	unsigned int mmap_miss;
+	unsigned int ra_pages;
+	pgoff_t offset = vmf->pgoff;
 
 	/* If we don't want any read-ahead, don't bother */
 	if (vmf->vma->vm_flags & VM_RAND_READ)
@@ -2960,7 +3014,9 @@ static struct file *do_sync_mmap_readahead(struct vm_fault *vmf)
 
 	if (vmf->vma->vm_flags & VM_SEQ_READ) {
 		fpin = maybe_unlock_mmap_for_io(vmf, fpin);
+		filemap_tracing_mark_begin(file, offset, ra->ra_pages, 1);
 		page_cache_sync_ra(&ractl, ra->ra_pages);
+		filemap_tracing_mark_end();
 		return fpin;
 	}
 
@@ -2980,11 +3036,18 @@ static struct file *do_sync_mmap_readahead(struct vm_fault *vmf)
 	 * mmap read-around
 	 */
 	fpin = maybe_unlock_mmap_for_io(vmf, fpin);
-	ra->start = max_t(long, 0, vmf->pgoff - ra->ra_pages / 2);
-	ra->size = ra->ra_pages;
-	ra->async_size = ra->ra_pages / 4;
+	ra_pages = min_t(unsigned int, ra->ra_pages, mmap_readaround_limit);
+	if (need_memory_boosting())
+		ra_pages = min_t(unsigned int, ra_pages, 8);
+	ra->start = max_t(long, 0, vmf->pgoff - ra_pages / 2);
+	ra->size = ra_pages;
+	ra->async_size = ra_pages / 4;
+	trace_android_vh_tune_mmap_readaround(ra->ra_pages, vmf->pgoff,
+			&ra->start, &ra->size, &ra->async_size);
 	ractl._index = ra->start;
+	filemap_tracing_mark_begin(file, offset, ra_pages, 1);
 	do_page_cache_ra(&ractl, ra->size, ra->async_size);
+	filemap_tracing_mark_end();
 	return fpin;
 }
 
@@ -3011,8 +3074,10 @@ static struct file *do_async_mmap_readahead(struct vm_fault *vmf,
 		WRITE_ONCE(ra->mmap_miss, --mmap_miss);
 	if (PageReadahead(page)) {
 		fpin = maybe_unlock_mmap_for_io(vmf, fpin);
+		filemap_tracing_mark_begin(file, offset, ra->ra_pages, 0);
 		page_cache_async_readahead(mapping, ra, file,
 					   page, offset, ra->ra_pages);
+		filemap_tracing_mark_end();
 	}
 	return fpin;
 }
@@ -3028,7 +3093,9 @@ static struct file *do_async_mmap_readahead(struct vm_fault *vmf,
  * it in the page cache, and handles the special cases reasonably without
  * having a lot of duplicated code.
  *
- * vma->vm_mm->mmap_lock must be held on entry.
+ * If FAULT_FLAG_SPECULATIVE is set, this function runs within an rcu
+ * read locked section and with mmap lock not held.
+ * Otherwise, vma->vm_mm->mmap_lock must be held on entry.
  *
  * If our return value has VM_FAULT_RETRY set, it's because the mmap_lock
  * may be dropped before doing I/O or by lock_page_maybe_drop_mmap().
@@ -3046,12 +3113,59 @@ vm_fault_t filemap_fault(struct vm_fault *vmf)
 	struct file *file = vmf->vma->vm_file;
 	struct file *fpin = NULL;
 	struct address_space *mapping = file->f_mapping;
+	struct file_ra_state *ra = &file->f_ra;
 	struct inode *inode = mapping->host;
 	pgoff_t offset = vmf->pgoff;
 	pgoff_t max_off;
 	struct page *page;
 	vm_fault_t ret = 0;
 	bool mapping_locked = false;
+
+	if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
+		page = find_get_page(mapping, offset);
+		if (unlikely(!page))
+			return VM_FAULT_RETRY;
+
+		if (unlikely(PageReadahead(page)))
+			goto page_put;
+
+		if (!trylock_page(page))
+			goto page_put;
+
+		if (unlikely(compound_head(page)->mapping != mapping))
+			goto page_unlock;
+		VM_BUG_ON_PAGE(page_to_pgoff(page) != offset, page);
+		if (unlikely(!PageUptodate(page)))
+			goto page_unlock;
+
+		max_off = DIV_ROUND_UP(i_size_read(inode), PAGE_SIZE);
+		if (unlikely(offset >= max_off))
+			goto page_unlock;
+
+		/*
+		 * Update readahead mmap_miss statistic.
+		 *
+		 * Note that we are not sure if finish_fault() will
+		 * manage to complete the transaction. If it fails,
+		 * we'll come back to filemap_fault() non-speculative
+		 * case which will update mmap_miss a second time.
+		 * This is not ideal, we would prefer to guarantee the
+		 * update will happen exactly once.
+		 */
+		if (!(vmf->vma->vm_flags & VM_RAND_READ) && ra->ra_pages) {
+			unsigned int mmap_miss = READ_ONCE(ra->mmap_miss);
+			if (mmap_miss)
+				WRITE_ONCE(ra->mmap_miss, --mmap_miss);
+		}
+
+		vmf->page = page;
+		return VM_FAULT_LOCKED;
+page_unlock:
+		unlock_page(page);
+page_put:
+		put_page(page);
+		return VM_FAULT_RETRY;
+	}
 
 	max_off = DIV_ROUND_UP(i_size_read(inode), PAGE_SIZE);
 	if (unlikely(offset >= max_off))
@@ -3162,7 +3276,9 @@ page_not_uptodate:
 	 * and we need to check for errors.
 	 */
 	fpin = maybe_unlock_mmap_for_io(vmf, fpin);
+	filemap_tracing_mark_begin(file, offset, 1, 1);
 	error = filemap_read_page(file, mapping, page);
+	filemap_tracing_mark_end();
 	if (fpin)
 		goto out_retry;
 	put_page(page);
@@ -3294,25 +3410,38 @@ vm_fault_t filemap_map_pages(struct vm_fault *vmf,
 	struct vm_area_struct *vma = vmf->vma;
 	struct file *file = vma->vm_file;
 	struct address_space *mapping = file->f_mapping;
-	pgoff_t last_pgoff = start_pgoff;
+	pgoff_t last_pgoff;
 	unsigned long addr;
 	XA_STATE(xas, &mapping->i_pages, start_pgoff);
 	struct page *head, *page;
 	unsigned int mmap_miss = READ_ONCE(file->f_ra.mmap_miss);
-	vm_fault_t ret = 0;
+	vm_fault_t ret = (vmf->flags & FAULT_FLAG_SPECULATIVE) ?
+		VM_FAULT_RETRY : 0;
+#ifdef CONFIG_PAGE_BOOST_RECORDING
+	pgoff_t head_pgoff = 0;
+#endif
 
-	rcu_read_lock();
+	/* filemap_map_pages() is called within an rcu read lock already. */
 	head = first_map_page(mapping, &xas, end_pgoff);
 	if (!head)
-		goto out;
+		return ret;
 
-	if (filemap_map_pmd(vmf, head)) {
-		ret = VM_FAULT_NOPAGE;
-		goto out;
+#ifdef CONFIG_PAGE_BOOST_RECORDING
+	head_pgoff = xas.xa_index;
+#endif
+
+	if (!(vmf->flags & FAULT_FLAG_SPECULATIVE) &&
+	    filemap_map_pmd(vmf, head))
+		return VM_FAULT_NOPAGE;
+
+	if (!pte_map_lock(vmf)) {
+		unlock_page(head);
+		put_page(head);
+		return VM_FAULT_RETRY;
 	}
+	addr = vmf->address;
+	last_pgoff = vmf->pgoff;
 
-	addr = vma->vm_start + ((start_pgoff - vma->vm_pgoff) << PAGE_SHIFT);
-	vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, addr, &vmf->ptl);
 	do {
 		page = find_subpage(head, xas.xa_index);
 		if (PageHWPoison(page))
@@ -3342,9 +3471,14 @@ unlock:
 		put_page(head);
 	} while ((head = next_map_page(mapping, &xas, end_pgoff)) != NULL);
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
-out:
-	rcu_read_unlock();
+	vmf->pte = NULL;
 	WRITE_ONCE(file->f_ra.mmap_miss, mmap_miss);
+
+#ifdef CONFIG_PAGE_BOOST_RECORDING
+	/* end_pgoff is inclusive */
+	if (ret == VM_FAULT_NOPAGE)
+		record_io_info(file, head_pgoff, last_pgoff - head_pgoff + 1);
+#endif
 	return ret;
 }
 EXPORT_SYMBOL(filemap_map_pages);
@@ -3379,6 +3513,7 @@ const struct vm_operations_struct generic_file_vm_ops = {
 	.fault		= filemap_fault,
 	.map_pages	= filemap_map_pages,
 	.page_mkwrite	= filemap_page_mkwrite,
+	.speculative	= true,
 };
 
 /* This is used for a general mmap of a disk file */

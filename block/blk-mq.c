@@ -41,6 +41,8 @@
 #include "blk-mq-sched.h"
 #include "blk-rq-qos.h"
 
+#include <trace/hooks/block.h>
+
 static DEFINE_PER_CPU(struct llist_head, blk_cpu_done);
 
 static void blk_mq_poll_stats_start(struct request_queue *q);
@@ -349,6 +351,7 @@ static struct request *blk_mq_rq_ctx_init(struct blk_mq_alloc_data *data,
 	}
 
 	data->hctx->queued++;
+	trace_android_vh_blk_rq_ctx_init(rq, tags, data, alloc_time_ns);
 	return rq;
 }
 
@@ -510,6 +513,14 @@ static void __blk_mq_free_request(struct request *rq)
 		blk_mq_put_tag(hctx->tags, ctx, rq->tag);
 	if (sched_tag != BLK_MQ_NO_TAG)
 		blk_mq_put_tag(hctx->sched_tags, ctx, sched_tag);
+
+	if (!__blk_mq_active_requests(hctx)) {
+		if (rq->tag != BLK_MQ_NO_TAG)
+			blk_mq_tag_wakeup_all(hctx->tags, false);
+		if (sched_tag != BLK_MQ_NO_TAG)
+			blk_mq_tag_wakeup_all(hctx->sched_tags, false);
+	}
+
 	blk_mq_sched_restart(hctx);
 	blk_queue_exit(q);
 }
@@ -629,17 +640,22 @@ static inline bool blk_mq_complete_need_ipi(struct request *rq)
 	return cpu_online(rq->mq_ctx->cpu);
 }
 
-static void blk_mq_complete_send_ipi(struct request *rq)
+static int blk_mq_complete_send_ipi(struct request *rq)
 {
 	struct llist_head *list;
 	unsigned int cpu;
+	int ret = 0;
 
 	cpu = rq->mq_ctx->cpu;
 	list = &per_cpu(blk_cpu_done, cpu);
 	if (llist_add(&rq->ipi_list, list)) {
 		INIT_CSD(&rq->csd, __blk_mq_complete_request_remote, rq);
-		smp_call_function_single_async(cpu, &rq->csd);
+		ret = smp_call_function_single_async(cpu, &rq->csd);
+		if (ret)
+			llist_del_all(list);
 	}
+
+	return ret;
 }
 
 static void blk_mq_raise_softirq(struct request *rq)
@@ -664,10 +680,9 @@ bool blk_mq_complete_request_remote(struct request *rq)
 	if (rq->cmd_flags & REQ_HIPRI)
 		return false;
 
-	if (blk_mq_complete_need_ipi(rq)) {
-		blk_mq_complete_send_ipi(rq);
-		return true;
-	}
+	if (blk_mq_complete_need_ipi(rq))
+		if (!blk_mq_complete_send_ipi(rq))
+			return true;
 
 	if (rq->q->nr_hw_queues == 1) {
 		blk_mq_raise_softirq(rq);
@@ -2464,6 +2479,7 @@ int blk_mq_alloc_rqs(struct blk_mq_tag_set *set, struct blk_mq_tags *tags,
 	 */
 	rq_size = round_up(sizeof(struct request) + set->cmd_size,
 				cache_line_size());
+	trace_android_vh_blk_alloc_rqs(&rq_size, set, tags, hctx_idx);
 	left = rq_size * depth;
 
 	for (i = 0; i < depth; ) {

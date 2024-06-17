@@ -16,6 +16,7 @@
 #include <linux/sched_clock.h>
 #include <linux/seqlock.h>
 #include <linux/bitops.h>
+#include <trace/hooks/epoch.h>
 
 #include "timekeeping.h"
 
@@ -79,6 +80,11 @@ notrace int sched_clock_read_retry(unsigned int seq)
 	return read_seqcount_latch_retry(&cd.seq, seq);
 }
 
+/* FIXME: This can make a cache contension problem.
+ * This valiable should be refactored as per_cpu variables.
+ */
+static atomic64_t sec_qc_summary_last_ns __used;
+
 unsigned long long notrace sched_clock(void)
 {
 	u64 cyc, res;
@@ -92,6 +98,8 @@ unsigned long long notrace sched_clock(void)
 		      rd->sched_clock_mask;
 		res = rd->epoch_ns + cyc_to_ns(cyc, rd->mult, rd->shift);
 	} while (sched_clock_read_retry(seq));
+
+	atomic64_set(&sec_qc_summary_last_ns, res);
 
 	return res;
 }
@@ -149,8 +157,7 @@ static enum hrtimer_restart sched_clock_poll(struct hrtimer *hrt)
 	return HRTIMER_RESTART;
 }
 
-void __init
-sched_clock_register(u64 (*read)(void), int bits, unsigned long rate)
+void sched_clock_register(u64 (*read)(void), int bits, unsigned long rate)
 {
 	u64 res, wrap, new_mask, new_epoch, cyc, ns;
 	u32 new_mult, new_shift;
@@ -224,6 +231,7 @@ sched_clock_register(u64 (*read)(void), int bits, unsigned long rate)
 
 	pr_debug("Registered %pS as sched_clock source\n", read);
 }
+EXPORT_SYMBOL_GPL(sched_clock_register);
 
 void __init generic_sched_clock_init(void)
 {
@@ -270,6 +278,7 @@ int sched_clock_suspend(void)
 	update_sched_clock();
 	hrtimer_cancel(&sched_clock_timer);
 	rd->read_sched_clock = suspended_sched_clock_read;
+	trace_android_vh_show_suspend_epoch_val(rd->epoch_ns, rd->epoch_cyc);
 
 	return 0;
 }
@@ -281,6 +290,7 @@ void sched_clock_resume(void)
 	rd->epoch_cyc = cd.actual_read_sched_clock();
 	hrtimer_start(&sched_clock_timer, cd.wrap_kt, HRTIMER_MODE_REL_HARD);
 	rd->read_sched_clock = cd.actual_read_sched_clock;
+	trace_android_vh_show_resume_epoch_val(rd->epoch_cyc);
 }
 
 static struct syscore_ops sched_clock_ops = {

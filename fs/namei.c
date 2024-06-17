@@ -1224,13 +1224,21 @@ int follow_up(struct path *path)
 		read_sequnlock_excl(&mount_lock);
 		return 0;
 	}
+#ifdef CONFIG_KDP_NS
+	mntget(((struct kdp_mount *)parent)->mnt);
+#else
 	mntget(&parent->mnt);
+#endif
 	mountpoint = dget(mnt->mnt_mountpoint);
 	read_sequnlock_excl(&mount_lock);
 	dput(path->dentry);
 	path->dentry = mountpoint;
 	mntput(path->mnt);
+#ifdef CONFIG_KDP_NS
+	path->mnt = ((struct kdp_mount *)parent)->mnt;
+#else
 	path->mnt = &parent->mnt;
+#endif
 	return 1;
 }
 EXPORT_SYMBOL(follow_up);
@@ -1243,10 +1251,22 @@ static bool choose_mountpoint_rcu(struct mount *m, const struct path *root,
 
 		m = m->mnt_parent;
 		if (unlikely(root->dentry == mountpoint &&
+#ifdef CONFIG_KDP_NS
+			     root->mnt == ((struct kdp_mount *)m)->mnt))
+#else
 			     root->mnt == &m->mnt))
+#endif
 			break;
+#ifdef CONFIG_KDP_NS
+		if (mountpoint != ((struct kdp_mount *)m)->mnt->mnt_root) {
+#else
 		if (mountpoint != m->mnt.mnt_root) {
+#endif
+#ifdef CONFIG_KDP_NS
+			path->mnt = ((struct kdp_mount *)m)->mnt;
+#else
 			path->mnt = &m->mnt;
+#endif
 			path->dentry = mountpoint;
 			*seqp = read_seqcount_begin(&mountpoint->d_seq);
 			return true;
@@ -1449,8 +1469,13 @@ static bool __follow_mount_rcu(struct nameidata *nd, struct path *path,
 		if (flags & DCACHE_MOUNTED) {
 			struct mount *mounted = __lookup_mnt(path->mnt, dentry);
 			if (mounted) {
+#ifdef CONFIG_KDP_NS
+				path->mnt = ((struct kdp_mount *)mounted)->mnt;
+				dentry = path->dentry = ((struct kdp_mount *)mounted)->mnt->mnt_root;
+#else
 				path->mnt = &mounted->mnt;
 				dentry = path->dentry = mounted->mnt.mnt_root;
+#endif
 				nd->state |= ND_JUMPED;
 				*seqp = read_seqcount_begin(&dentry->d_seq);
 				*inode = dentry->d_inode;
@@ -2573,7 +2598,7 @@ int kern_path(const char *name, unsigned int flags, struct path *path)
 	return ret;
 
 }
-EXPORT_SYMBOL(kern_path);
+EXPORT_SYMBOL_NS(kern_path, ANDROID_GKI_VFS_EXPORT_ONLY);
 
 /**
  * vfs_path_lookup - lookup a file path relative to a dentry-vfsmount pair
@@ -3094,7 +3119,7 @@ int vfs_create(struct user_namespace *mnt_userns, struct inode *dir,
 		fsnotify_create(dir, dentry);
 	return error;
 }
-EXPORT_SYMBOL(vfs_create);
+EXPORT_SYMBOL_NS(vfs_create, ANDROID_GKI_VFS_EXPORT_ONLY);
 
 int vfs_mkobj(struct dentry *dentry, umode_t mode,
 		int (*f)(struct dentry *, umode_t, void *),
@@ -3996,7 +4021,7 @@ int vfs_mkdir(struct user_namespace *mnt_userns, struct inode *dir,
 		fsnotify_mkdir(dir, dentry);
 	return error;
 }
-EXPORT_SYMBOL(vfs_mkdir);
+EXPORT_SYMBOL_NS(vfs_mkdir, ANDROID_GKI_VFS_EXPORT_ONLY);
 
 int do_mkdirat(int dfd, struct filename *name, umode_t mode)
 {
@@ -4091,7 +4116,7 @@ out:
 		d_delete_notify(dir, dentry);
 	return error;
 }
-EXPORT_SYMBOL(vfs_rmdir);
+EXPORT_SYMBOL_NS(vfs_rmdir, ANDROID_GKI_VFS_EXPORT_ONLY);
 
 int do_rmdir(int dfd, struct filename *name)
 {
@@ -4226,7 +4251,7 @@ out:
 
 	return error;
 }
-EXPORT_SYMBOL(vfs_unlink);
+EXPORT_SYMBOL_NS(vfs_unlink, ANDROID_GKI_VFS_EXPORT_ONLY);
 
 /*
  * Make sure that the actual truncation of the file will occur outside its
@@ -4496,7 +4521,7 @@ int vfs_link(struct dentry *old_dentry, struct user_namespace *mnt_userns,
 		fsnotify_link(dir, inode, new_dentry);
 	return error;
 }
-EXPORT_SYMBOL(vfs_link);
+EXPORT_SYMBOL_NS(vfs_link, ANDROID_GKI_VFS_EXPORT_ONLY);
 
 /*
  * Hardlinks are often used in delicate situations.  We avoid
@@ -4775,7 +4800,7 @@ out:
 
 	return error;
 }
-EXPORT_SYMBOL(vfs_rename);
+EXPORT_SYMBOL_NS(vfs_rename, ANDROID_GKI_VFS_EXPORT_ONLY);
 
 int do_renameat2(int olddfd, struct filename *from, int newdfd,
 		 struct filename *to, unsigned int flags)

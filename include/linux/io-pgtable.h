@@ -4,7 +4,7 @@
 
 #include <linux/bitops.h>
 #include <linux/iommu.h>
-
+#include <soc/qcom/msm_tz_smmu.h>
 /*
  * Public API for use by IOMMU drivers
  */
@@ -17,6 +17,9 @@ enum io_pgtable_fmt {
 	ARM_MALI_LPAE,
 	AMD_IOMMU_V1,
 	APPLE_DART,
+#ifdef CONFIG_MSM_TZ_SMMU
+	ARM_MSM_SECURE,
+#endif
 	IO_PGTABLE_NUM_FMTS,
 };
 
@@ -142,6 +145,12 @@ struct io_pgtable_cfg {
 			u64 ttbr[4];
 			u32 n_ttbrs;
 		} apple_dart_cfg;
+#ifdef CONFIG_MSM_TZ_SMMU
+		struct {
+			enum tz_smmu_device_id sec_id;
+			int cbndx;
+		} arm_msm_secure_cfg;
+#endif
 	};
 };
 
@@ -150,6 +159,9 @@ struct io_pgtable_cfg {
  *
  * @map:          Map a physically contiguous memory region.
  * @map_pages:    Map a physically contiguous range of pages of the same size.
+ * @map_sg:       Map a scatter-gather list of physically contiguous memory
+ *                chunks. The mapped pointer argument is used to store how
+ *                many bytes are mapped.
  * @unmap:        Unmap a physically contiguous memory region.
  * @unmap_pages:  Unmap a range of virtually contiguous pages of the same size.
  * @iova_to_phys: Translate iova to physical address.
@@ -163,6 +175,9 @@ struct io_pgtable_ops {
 	int (*map_pages)(struct io_pgtable_ops *ops, unsigned long iova,
 			 phys_addr_t paddr, size_t pgsize, size_t pgcount,
 			 int prot, gfp_t gfp, size_t *mapped);
+	int (*map_sg)(struct io_pgtable_ops *ops, unsigned long iova,
+		      struct scatterlist *sg, unsigned int nents, int prot,
+		      gfp_t gfp, size_t *mapped);
 	size_t (*unmap)(struct io_pgtable_ops *ops, unsigned long iova,
 			size_t size, struct iommu_iotlb_gather *gather);
 	size_t (*unmap_pages)(struct io_pgtable_ops *ops, unsigned long iova,
@@ -261,5 +276,8 @@ extern struct io_pgtable_init_fns io_pgtable_arm_v7s_init_fns;
 extern struct io_pgtable_init_fns io_pgtable_arm_mali_lpae_init_fns;
 extern struct io_pgtable_init_fns io_pgtable_amd_iommu_v1_init_fns;
 extern struct io_pgtable_init_fns io_pgtable_apple_dart_init_fns;
+#ifdef CONFIG_MSM_TZ_SMMU
+extern struct io_pgtable_init_fns io_pgtable_arm_msm_secure_init_fns;
+#endif
 
 #endif /* __IO_PGTABLE_H */

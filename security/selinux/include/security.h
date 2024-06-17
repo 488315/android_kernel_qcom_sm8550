@@ -97,6 +97,8 @@ struct selinux_state {
 	bool checkreqprot;
 	bool initialized;
 	bool policycap[__POLICYDB_CAPABILITY_MAX];
+	bool android_netlink_route;
+	bool android_netlink_getneigh;
 
 	struct page *status_page;
 	struct mutex status_lock;
@@ -123,14 +125,15 @@ static inline void selinux_mark_initialized(struct selinux_state *state)
 }
 
 #ifdef CONFIG_SECURITY_SELINUX_DEVELOP
+extern int selinux_enforcing;
 static inline bool enforcing_enabled(struct selinux_state *state)
 {
-	return READ_ONCE(state->enforcing);
+	return selinux_enforcing; // SEC_SELINUX_PORTING_COMMON Change to use RKP
 }
 
 static inline void enforcing_set(struct selinux_state *state, bool value)
 {
-	WRITE_ONCE(state->enforcing, value);
+	selinux_enforcing = value; // SEC_SELINUX_PORTING_COMMON Change to use RKP
 }
 #else
 static inline bool enforcing_enabled(struct selinux_state *state)
@@ -226,6 +229,20 @@ static inline bool selinux_policycap_ioctl_skip_cloexec(void)
 	return READ_ONCE(state->policycap[POLICYDB_CAPABILITY_IOCTL_SKIP_CLOEXEC]);
 }
 
+static inline bool selinux_android_nlroute_getlink(void)
+{
+	struct selinux_state *state = &selinux_state;
+
+	return state->android_netlink_route;
+}
+
+static inline bool selinux_android_nlroute_getneigh(void)
+{
+	struct selinux_state *state = &selinux_state;
+
+	return state->android_netlink_getneigh;
+}
+
 struct selinux_policy_convert_data;
 
 struct selinux_load_state {
@@ -281,7 +298,13 @@ struct extended_perms {
 };
 
 /* definitions of av_decision.flags */
+// [ SEC_SELINUX_PORTING_COMMON
+#ifdef CONFIG_ALWAYS_ENFORCE
+#define AVD_FLAGS_PERMISSIVE	0x0000
+#else
 #define AVD_FLAGS_PERMISSIVE	0x0001
+#endif
+// ] SEC_SELINUX_PORTING_COMMON
 
 void security_compute_av(struct selinux_state *state,
 			 u32 ssid, u32 tsid,
@@ -459,5 +482,6 @@ extern void avtab_cache_init(void);
 extern void ebitmap_cache_init(void);
 extern void hashtab_cache_init(void);
 extern int security_sidtab_hash_stats(struct selinux_state *state, char *page);
+extern void selinux_nlmsg_init(void);
 
 #endif /* _SELINUX_SECURITY_H_ */

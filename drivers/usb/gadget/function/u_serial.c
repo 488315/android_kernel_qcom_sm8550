@@ -915,8 +915,11 @@ static void __gs_console_push(struct gs_console *cons)
 	}
 
 	req->length = size;
+
+	spin_unlock_irq(&cons->lock);
 	if (usb_ep_queue(ep, req, GFP_ATOMIC))
 		req->length = 0;
+	spin_lock_irq(&cons->lock);
 }
 
 static void gs_console_work(struct work_struct *work)
@@ -1374,8 +1377,12 @@ void gserial_disconnect(struct gserial *gser)
 	struct gs_port	*port = gser->ioport;
 	unsigned long	flags;
 
-	if (!port)
+	pr_info("%s start", __func__);
+
+	if (!port) {
+		pr_info("%s: port is NULL", __func__);
 		return;
+	}
 
 	spin_lock_irqsave(&serial_port_lock, flags);
 

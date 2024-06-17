@@ -75,6 +75,8 @@
 
 #include <trace/events/sched.h>
 
+EXPORT_TRACEPOINT_SYMBOL_GPL(task_rename);
+
 static int bprm_creds_from_file(struct linux_binprm *bprm);
 
 int suid_dumpable = 0;
@@ -285,6 +287,7 @@ err:
 	mmap_write_unlock(mm);
 err_free:
 	bprm->vma = NULL;
+	VM_BUG_ON(vma->vm_file);
 	vm_area_free(vma);
 	return err;
 }
@@ -758,6 +761,7 @@ int setup_arg_pages(struct linux_binprm *bprm,
 	unsigned long stack_size;
 	unsigned long stack_expand;
 	unsigned long rlim_stack;
+	struct mmu_gather tlb;
 
 #ifdef CONFIG_STACK_GROWSUP
 	/* Limit stack size */
@@ -812,8 +816,11 @@ int setup_arg_pages(struct linux_binprm *bprm,
 	vm_flags |= mm->def_flags;
 	vm_flags |= VM_STACK_INCOMPLETE_SETUP;
 
-	ret = mprotect_fixup(vma, &prev, vma->vm_start, vma->vm_end,
+	tlb_gather_mmu(&tlb, mm);
+	ret = mprotect_fixup(&tlb, vma, &prev, vma->vm_start, vma->vm_end,
 			vm_flags);
+	tlb_finish_mmu(&tlb);
+
 	if (ret)
 		goto out_unlock;
 	BUG_ON(prev != vma);
@@ -1026,8 +1033,14 @@ static int exec_mmap(struct mm_struct *mm)
 	if (IS_ENABLED(CONFIG_ARCH_WANT_IRQS_OFF_ACTIVATE_MM))
 		local_irq_enable();
 	tsk->mm->vmacache_seqnum = 0;
+	lru_gen_add_mm(mm);
 	vmacache_flush(tsk);
+#ifdef CONFIG_KDP_CRED
+	if (kdp_enable)
+		uh_call(UH_APP_KDP, SET_CRED_PGD, (u64)current_cred(), (u64)mm->pgd, 0, 0);
+#endif
 	task_unlock(tsk);
+	lru_gen_use_mm(mm);
 	if (old_mm) {
 		mmap_read_unlock(old_mm);
 		BUG_ON(active_mm != old_mm);
@@ -2092,6 +2105,29 @@ SYSCALL_DEFINE3(execve,
 		const char __user *const __user *, argv,
 		const char __user *const __user *, envp)
 {
+#ifdef CONFIG_KDP_CRED
+	struct filename *path = getname(filename);
+	int error = PTR_ERR(path);
+
+	if (IS_ERR(path))
+		return error;
+
+	if (kdp_enable) {
+		uh_call(UH_APP_KDP, MARK_PPT, (u64)path->name, (u64)current, 0, 0);
+		if (current->cred->uid.val == 0 || current->cred->gid.val == 0 ||
+			current->cred->euid.val == 0 || current->cred->egid.val == 0 ||
+			current->cred->suid.val == 0 || current->cred->sgid.val == 0) {
+			if (kdp_restrict_fork(path)) {
+				pr_warn("RKP_KDP Restricted making process. PID = %d(%s) PPID = %d(%s)\n",
+						current->pid, current->comm,
+						current->parent->pid, current->parent->comm);
+				putname(path);
+				return -EACCES;
+			}
+		}
+	}
+	putname(path);
+#endif
 	return do_execve(getname(filename), argv, envp);
 }
 

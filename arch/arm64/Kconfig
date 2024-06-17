@@ -10,9 +10,11 @@ config ARM64
 	select ACPI_SPCR_TABLE if ACPI
 	select ACPI_PPTT if ACPI
 	select ARCH_HAS_DEBUG_WX
+	select ARCH_BINFMT_ELF_EXTRA_PHDRS
 	select ARCH_BINFMT_ELF_STATE
 	select ARCH_ENABLE_HUGEPAGE_MIGRATION if HUGETLB_PAGE && MIGRATION
 	select ARCH_ENABLE_MEMORY_HOTPLUG
+	select ARCH_MEMORY_PROBE
 	select ARCH_ENABLE_MEMORY_HOTREMOVE
 	select ARCH_ENABLE_SPLIT_PMD_PTLOCK if PGTABLE_LEVELS > 2
 	select ARCH_ENABLE_THP_MIGRATION if TRANSPARENT_HUGEPAGE
@@ -25,9 +27,11 @@ config ARM64
 	select ARCH_HAS_FORTIFY_SOURCE
 	select ARCH_HAS_GCOV_PROFILE_ALL
 	select ARCH_HAS_GIGANTIC_PAGE
+	select ARCH_HAS_IOREMAP_PHYS_HOOKS
 	select ARCH_HAS_KCOV
 	select ARCH_HAS_KEEPINITRD
 	select ARCH_HAS_MEMBARRIER_SYNC_CORE
+	select ARCH_HAS_MEM_ENCRYPT
 	select ARCH_HAS_NON_OVERLAPPING_ADDRESS_SPACE
 	select ARCH_HAS_PTE_DEVMAP
 	select ARCH_HAS_PTE_SPECIAL
@@ -45,6 +49,7 @@ config ARM64
 	select ARCH_HAS_ZONE_DMA_SET if EXPERT
 	select ARCH_HAVE_ELF_PROT
 	select ARCH_HAVE_NMI_SAFE_CMPXCHG
+	select ARCH_HAVE_TRACE_MMIO_ACCESS
 	select ARCH_INLINE_READ_LOCK if !PREEMPTION
 	select ARCH_INLINE_READ_LOCK_BH if !PREEMPTION
 	select ARCH_INLINE_READ_LOCK_IRQ if !PREEMPTION
@@ -122,6 +127,7 @@ config ARM64
 	select GENERIC_FIND_FIRST_BIT
 	select GENERIC_IDLE_POLL_SETUP
 	select GENERIC_IRQ_IPI
+	select ARCH_WANTS_IRQ_RAW
 	select GENERIC_IRQ_PROBE
 	select GENERIC_IRQ_SHOW
 	select GENERIC_IRQ_SHOW_LEVEL
@@ -185,6 +191,7 @@ config ARM64
 	select HAVE_GCC_PLUGINS
 	select HAVE_HW_BREAKPOINT if PERF_EVENTS
 	select HAVE_IRQ_TIME_ACCOUNTING
+	select HAVE_KVM
 	select HAVE_NMI
 	select HAVE_PATA_PLATFORM
 	select HAVE_PERF_EVENTS
@@ -203,7 +210,7 @@ config ARM64
 	select IOMMU_DMA if IOMMU_SUPPORT
 	select IRQ_DOMAIN
 	select IRQ_FORCED_THREADING
-	select KASAN_VMALLOC if KASAN_GENERIC
+	select KASAN_VMALLOC if KASAN
 	select MODULES_USE_ELF_RELA
 	select NEED_DMA_MAP_STATE
 	select NEED_SG_DMA_LENGTH
@@ -221,6 +228,7 @@ config ARM64
 	select HAVE_ARCH_USERFAULTFD_MINOR if USERFAULTFD
 	select TRACE_IRQFLAGS_SUPPORT
 	select TRACE_IRQFLAGS_NMI_SUPPORT
+	select ARCH_SUPPORTS_SPECULATIVE_PAGE_FAULT
 	help
 	  ARM 64-bit (AArch64) Linux support.
 
@@ -487,22 +495,6 @@ config ARM64_ERRATUM_834220
 
 	  If unsure, say Y.
 
-config ARM64_ERRATUM_1742098
-	bool "Cortex-A57/A72: 1742098: ELR recorded incorrectly on interrupt taken between cryptographic instructions in a sequence"
-	depends on COMPAT
-	default y
-	help
-	  This option removes the AES hwcap for aarch32 user-space to
-	  workaround erratum 1742098 on Cortex-A57 and Cortex-A72.
-
-	  Affected parts may corrupt the AES state if an interrupt is
-	  taken between a pair of AES instructions. These instructions
-	  are only present if the cryptography extensions are present.
-	  All software should have a fallback implementation for CPUs
-	  that don't implement the cryptography extensions.
-
-	  If unsure, say Y.
-
 config ARM64_ERRATUM_845719
 	bool "Cortex-A53: 845719: a load might read incorrect data"
 	depends on COMPAT
@@ -666,6 +658,7 @@ config ARM64_ERRATUM_1463225
 config ARM64_ERRATUM_1542419
 	bool "Neoverse-N1: workaround mis-ordering of instruction fetches"
 	default y
+	depends on BROKEN # CPU cap re-allocated by Android
 	help
 	  This option adds a workaround for ARM Neoverse-N1 erratum
 	  1542419.
@@ -696,6 +689,117 @@ config ARM64_ERRATUM_1508412
 	  Work around the issue by inserting DMB SY barriers around PAR_EL1
 	  register reads and warning KVM users. The DMB barrier is sufficient
 	  to prevent a speculative PAR_EL1 read.
+
+	  If unsure, say Y.
+
+config ARM64_WORKAROUND_TRBE_OVERWRITE_FILL_MODE
+	bool
+
+config ARM64_ERRATUM_2119858
+	bool "Cortex-A710: 2119858: workaround TRBE overwriting trace data in FILL mode"
+	default y
+	depends on CORESIGHT_TRBE
+	select ARM64_WORKAROUND_TRBE_OVERWRITE_FILL_MODE
+	help
+	  This option adds the workaround for ARM Cortex-A710 erratum 2119858.
+
+	  Affected Cortex-A710 cores could overwrite up to 3 cache lines of trace
+	  data at the base of the buffer (pointed to by TRBASER_EL1) in FILL mode in
+	  the event of a WRAP event.
+
+	  Work around the issue by always making sure we move the TRBPTR_EL1 by
+	  256 bytes before enabling the buffer and filling the first 256 bytes of
+	  the buffer with ETM ignore packets upon disabling.
+
+	  If unsure, say Y.
+
+config ARM64_ERRATUM_2139208
+	bool "Neoverse-N2: 2139208: workaround TRBE overwriting trace data in FILL mode"
+	default y
+	depends on CORESIGHT_TRBE
+	select ARM64_WORKAROUND_TRBE_OVERWRITE_FILL_MODE
+	help
+	  This option adds the workaround for ARM Neoverse-N2 erratum 2139208.
+
+	  Affected Neoverse-N2 cores could overwrite up to 3 cache lines of trace
+	  data at the base of the buffer (pointed to by TRBASER_EL1) in FILL mode in
+	  the event of a WRAP event.
+
+	  Work around the issue by always making sure we move the TRBPTR_EL1 by
+	  256 bytes before enabling the buffer and filling the first 256 bytes of
+	  the buffer with ETM ignore packets upon disabling.
+
+	  If unsure, say Y.
+
+config ARM64_WORKAROUND_TSB_FLUSH_FAILURE
+	bool
+
+config ARM64_ERRATUM_2054223
+	bool "Cortex-A710: 2054223: workaround TSB instruction failing to flush trace"
+	default y
+	select ARM64_WORKAROUND_TSB_FLUSH_FAILURE
+	help
+	  Enable workaround for ARM Cortex-A710 erratum 2054223
+
+	  Affected cores may fail to flush the trace data on a TSB instruction, when
+	  the PE is in trace prohibited state. This will cause losing a few bytes
+	  of the trace cached.
+
+	  Workaround is to issue two TSB consecutively on affected cores.
+
+	  If unsure, say Y.
+
+config ARM64_ERRATUM_2067961
+	bool "Neoverse-N2: 2067961: workaround TSB instruction failing to flush trace"
+	default y
+	select ARM64_WORKAROUND_TSB_FLUSH_FAILURE
+	help
+	  Enable workaround for ARM Neoverse-N2 erratum 2067961
+
+	  Affected cores may fail to flush the trace data on a TSB instruction, when
+	  the PE is in trace prohibited state. This will cause losing a few bytes
+	  of the trace cached.
+
+	  Workaround is to issue two TSB consecutively on affected cores.
+
+	  If unsure, say Y.
+
+config ARM64_WORKAROUND_TRBE_WRITE_OUT_OF_RANGE
+	bool
+
+config ARM64_ERRATUM_2253138
+	bool "Neoverse-N2: 2253138: workaround TRBE writing to address out-of-range"
+	depends on CORESIGHT_TRBE
+	default y
+	select ARM64_WORKAROUND_TRBE_WRITE_OUT_OF_RANGE
+	help
+	  This option adds the workaround for ARM Neoverse-N2 erratum 2253138.
+
+	  Affected Neoverse-N2 cores might write to an out-of-range address, not reserved
+	  for TRBE. Under some conditions, the TRBE might generate a write to the next
+	  virtually addressed page following the last page of the TRBE address space
+	  (i.e., the TRBLIMITR_EL1.LIMIT), instead of wrapping around to the base.
+
+	  Work around this in the driver by always making sure that there is a
+	  page beyond the TRBLIMITR_EL1.LIMIT, within the space allowed for the TRBE.
+
+	  If unsure, say Y.
+
+config ARM64_ERRATUM_2224489
+	bool "Cortex-A710: 2224489: workaround TRBE writing to address out-of-range"
+	depends on CORESIGHT_TRBE
+	default y
+	select ARM64_WORKAROUND_TRBE_WRITE_OUT_OF_RANGE
+	help
+	  This option adds the workaround for ARM Cortex-A710 erratum 2224489.
+
+	  Affected Cortex-A710 cores might write to an out-of-range address, not reserved
+	  for TRBE. Under some conditions, the TRBE might generate a write to the next
+	  virtually addressed page following the last page of the TRBE address space
+	  (i.e., the TRBLIMITR_EL1.LIMIT), instead of wrapping around to the base.
+
+	  Work around this in the driver by always making sure that there is a
+	  page beyond the TRBLIMITR_EL1.LIMIT, within the space allowed for the TRBE.
 
 	  If unsure, say Y.
 
@@ -730,47 +834,6 @@ config ARM64_ERRATUM_2457168
 	  Work around this problem by returning 0 when reading the affected counter in
 	  key locations that results in disabling all users of this counter. This effect
 	  is the same to firmware disabling affected counters.
-
-	  If unsure, say Y.
-
-config ARM64_WORKAROUND_TRBE_OVERWRITE_FILL_MODE
-	bool
-
-config ARM64_ERRATUM_2119858
-	bool "Cortex-A710: 2119858: workaround TRBE overwriting trace data in FILL mode"
-	default y
-	depends on COMPILE_TEST # Until the CoreSight TRBE driver changes are in
-	depends on CORESIGHT_TRBE
-	select ARM64_WORKAROUND_TRBE_OVERWRITE_FILL_MODE
-	help
-	  This option adds the workaround for ARM Cortex-A710 erratum 2119858.
-
-	  Affected Cortex-A710 cores could overwrite up to 3 cache lines of trace
-	  data at the base of the buffer (pointed to by TRBASER_EL1) in FILL mode in
-	  the event of a WRAP event.
-
-	  Work around the issue by always making sure we move the TRBPTR_EL1 by
-	  256 bytes before enabling the buffer and filling the first 256 bytes of
-	  the buffer with ETM ignore packets upon disabling.
-
-	  If unsure, say Y.
-
-config ARM64_ERRATUM_2139208
-	bool "Neoverse-N2: 2139208: workaround TRBE overwriting trace data in FILL mode"
-	default y
-	depends on COMPILE_TEST # Until the CoreSight TRBE driver changes are in
-	depends on CORESIGHT_TRBE
-	select ARM64_WORKAROUND_TRBE_OVERWRITE_FILL_MODE
-	help
-	  This option adds the workaround for ARM Neoverse-N2 erratum 2139208.
-
-	  Affected Neoverse-N2 cores could overwrite up to 3 cache lines of trace
-	  data at the base of the buffer (pointed to by TRBASER_EL1) in FILL mode in
-	  the event of a WRAP event.
-
-	  Work around the issue by always making sure we move the TRBPTR_EL1 by
-	  256 bytes before enabling the buffer and filling the first 256 bytes of
-	  the buffer with ETM ignore packets upon disabling.
 
 	  If unsure, say Y.
 
@@ -813,6 +876,7 @@ config CAVIUM_ERRATUM_23154
 config CAVIUM_ERRATUM_27456
 	bool "Cavium erratum 27456: Broadcast TLBI instructions may cause icache corruption"
 	default y
+	depends on BROKEN # CPU cap re-allocated by Android
 	help
 	  On ThunderX T88 pass 1.x through 2.1 parts, broadcast TLBI
 	  instructions may cause the icache to become corrupted if it
@@ -824,6 +888,7 @@ config CAVIUM_ERRATUM_27456
 config CAVIUM_ERRATUM_30115
 	bool "Cavium erratum 30115: Guest may disable interrupts in host"
 	default y
+	depends on BROKEN # CPU cap re-allocated by Android
 	help
 	  On ThunderX T88 pass 1.x through 2.2, T81 pass 1.0 through
 	  1.2, and T83 Pass 1.0, KVM guest execution may disable
@@ -835,6 +900,7 @@ config CAVIUM_ERRATUM_30115
 config CAVIUM_TX2_ERRATUM_219
 	bool "Cavium ThunderX2 erratum 219: PRFM between TTBR change and ISB fails"
 	default y
+	depends on BROKEN # CPU caps re-allocated by Android
 	help
 	  On Cavium ThunderX2, a load, store or prefetch instruction between a
 	  TTBR update and the corresponding context synchronizing operation can
@@ -1068,6 +1134,18 @@ config ARM64_PA_BITS
 	default 48 if ARM64_PA_BITS_48
 	default 52 if ARM64_PA_BITS_52
 
+config ARM64_MEMMAP_ON_MEMORY
+	bool "Support memmap_on_memory"
+	default n
+	depends on MHP_MEMMAP_ON_MEMORY
+	depends on !HUGETLB_PAGE
+	help
+	  Adjust the ARM64 section size such that the size of the
+	  struct page array (the memmap) for a memory block is aligned to
+	  pageblock_nr_pages. When hotplugging memory, this allows the
+	  memmap to be allocated from within the new memory block thus
+	  reducing pressure on existing memory blocks.
+
 choice
 	prompt "Endianness"
 	default CPU_LITTLE_ENDIAN
@@ -1089,6 +1167,14 @@ config CPU_LITTLE_ENDIAN
 	  This is usually the case for distributions targeting arm64.
 
 endchoice
+
+config ARM64_KMALLOC64
+	bool "Use kmalloc-64"
+	help
+	  Some ARM64 cpus may use a 64 byte cacheline instead of 128 byte.
+	  This allows the smallest kmalloc cache to be 64 bytes, which
+	  can save memory for allocations smaller than 64 bytes.
+	  Say N if unsure.
 
 config SCHED_MC
 	bool "Multi-core scheduler support"
@@ -1160,6 +1246,17 @@ config ARCH_SPARSEMEM_ENABLE
 config HW_PERF_EVENTS
 	def_bool y
 	depends on ARM_PMU
+
+config ARCH_MEMORY_PROBE
+	bool "Enable sysfs memory/probe interface"
+	depends on MEMORY_HOTPLUG
+	help
+	  This option enables a sysfs memory/probe interface for testing.
+	  See Documentation/admin-guide/mm/memory-hotplug.rst for more information.
+	  If you are unsure how to answer this question, answer N.
+
+	  Add userspace sysfs memory probe interface /sys/device/system/memory/probe.
+	  Write physical address to this interface to probe memory.
 
 # Supported by clang >= 7.0
 config CC_HAVE_SHADOW_CALL_STACK
@@ -1680,6 +1777,21 @@ config ARM64_TLB_RANGE
 	  The feature introduces new assembly instructions, and they were
 	  support when binutils >= 2.30.
 
+config ARM64_MPAM
+	bool "Enable support for MPAM"
+	help
+	  Memory Partitioning and Monitoring is an optional extension
+	  that allows the CPUs to mark load and store transactions with
+	  labels for partition-id and performance-monitoring-group.
+	  System components, such as the caches, can use the partition-id
+	  to apply a performance policy. MPAM monitors can use the
+	  partition-id and performance-monitoring-group to measure the
+	  cache occupancy or data throughput.
+
+	  Use of this extension requires CPU support, support in the
+	  memory system components (MSC), and a description from firmware
+	  of where the MSC are in the address space.
+
 endmenu
 
 menu "ARMv8.5 architectural features"
@@ -1973,6 +2085,12 @@ config CMDLINE_FROM_BOOTLOADER
 	  the boot loader doesn't provide any, the default kernel command
 	  string provided in CMDLINE will be used.
 
+config CMDLINE_EXTEND
+	bool "Extend bootloader kernel arguments"
+	help
+	  The command-line arguments provided by the boot loader will be
+	  appended to the default kernel command string.
+
 config CMDLINE_FORCE
 	bool "Always use the default kernel command string"
 	help
@@ -2023,6 +2141,89 @@ config SYSVIPC_COMPAT
 	def_bool y
 	depends on COMPAT && SYSVIPC
 
+menu "Hypervisor"
+config UH
+	bool "Enable micro hypervisor feature"
+	depends on !SEC_FACTORY
+	default y
+	help
+	  It enables a micro hypervisor.
+	  It's samsung's hypervisor.
+	  RKP and etc can be loaded on it.
+	  please check a memory map for it.
+	  
+config RKP
+	bool "Enable RKP(Realtime Kernel Protection) feature"
+	depends on UH
+	default y
+	help
+	  This solution provides the kernel protection
+	  using a security monitor located within an isolated execution environment.
+	  This isolated execution environment is either the Secure World of ARM TrustZone
+	  or a thin hypervisor that is protected by the hardware virtualization extensions.
+
+config RKP_FIMC_CHECK
+    bool "Enable fimc signing verification"
+    depends on RKP
+    default n
+    help
+      it verifies fimc signing.
+      
+config KDP
+	bool "Enable KDP(Kernel Data Protection) feature"
+	depends on !SEC_VTS_TEST
+	depends on UH
+	default y
+	help
+	  Prevents unauthorized cred modification,
+	  namespace modification, mapping for page table.
+
+config KDP_CRED
+	bool "Enable KDP(Kernel Data Protection) cred feature"
+	depends on !SEC_VTS_TEST
+	depends on UH
+	depends on KDP
+	default y
+	help
+	  Prevents unauthorized cred modification,
+	  namespace modification, mapping for page table.
+
+config KDP_NS
+	bool "Enable KDP(Kernel Data Protection) namespace feature"
+	depends on !SEC_VTS_TEST
+	depends on UH
+	depends on KDP
+	default y
+	help
+	  Prevents unauthorized cred modification,
+	  namespace modification, mapping for page table.
+	  
+config RKP_TEST
+	bool "Enable RKP test"
+	depends on !SAMSUNG_PRODUCT_SHIP && RKP
+	default y
+	help
+	  It is a test feature for RKP debugging.
+	  This configuration checks following lists.
+	  USER_PXN
+	  USER_PGTABLE_RO
+	  KERNEL_PGTABLE_RO
+	  KERNEL_L3PGT_RO
+	  KERNEL_RANGE_RWX
+	  
+config KDP_TEST
+	bool "Enable KDP test"
+	depends on !SAMSUNG_PRODUCT_SHIP && KDP_CRED && KDP_NS
+	default y
+	help
+	  It is a test configuration for KDP debugging.
+	  This configuration checks following lists.
+	  TASK_CRED_RO
+	  TASK_SECURITY_CONTEXT_RO
+	  CRED_MATCH_BACKPOINTERS
+	  SEC_CONTEXT_BACKPOINTER
+endmenu
+
 menu "Power management options"
 
 source "kernel/power/Kconfig"
@@ -2051,6 +2252,8 @@ endmenu
 source "drivers/acpi/Kconfig"
 
 source "arch/arm64/kvm/Kconfig"
+
+source "arch/arm64/gunyah/Kconfig"
 
 if CRYPTO
 source "arch/arm64/crypto/Kconfig"

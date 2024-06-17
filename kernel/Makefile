@@ -41,9 +41,6 @@ KCSAN_SANITIZE_kcov.o := n
 UBSAN_SANITIZE_kcov.o := n
 CFLAGS_kcov.o := $(call cc-option, -fno-conserve-stack) -fno-stack-protector
 
-# Don't instrument error handlers
-CFLAGS_REMOVE_cfi.o := $(CC_FLAGS_CFI)
-
 obj-y += sched/
 obj-y += locking/
 obj-y += power/
@@ -69,6 +66,7 @@ obj-$(CONFIG_UID16) += uid16.o
 obj-$(CONFIG_MODULES) += module.o
 obj-$(CONFIG_MODULE_SIG) += module_signing.o
 obj-$(CONFIG_MODULE_SIG_FORMAT) += module_signature.o
+obj-$(CONFIG_MODULE_SIG_PROTECT) += gki_module.o
 obj-$(CONFIG_KALLSYMS) += kallsyms.o
 obj-$(CONFIG_BSD_PROCESS_ACCT) += acct.o
 obj-$(CONFIG_CRASH_CORE) += crash_core.o
@@ -101,6 +99,7 @@ obj-$(CONFIG_RELAY) += relay.o
 obj-$(CONFIG_SYSCTL) += utsname_sysctl.o
 obj-$(CONFIG_TASK_DELAY_ACCT) += delayacct.o
 obj-$(CONFIG_TASKSTATS) += taskstats.o tsacct.o
+obj-$(CONFIG_MSM_SYSSTATS) += msm_sysstats.o
 obj-$(CONFIG_TRACEPOINTS) += tracepoint.o
 obj-$(CONFIG_LATENCYTOP) += latencytop.o
 obj-$(CONFIG_FUNCTION_TRACER) += trace/
@@ -160,3 +159,19 @@ $(obj)/kheaders_data.tar.xz: FORCE
 	$(call cmd,genikh)
 
 clean-files := kheaders_data.tar.xz kheaders.md5
+
+#
+# ANDROID: GKI: Generate headerfiles required for gki_module.o
+#
+# Dependencies on generated files need to be listed explicitly
+$(obj)/gki_module.o: $(obj)/gki_module_protected.h $(obj)/gki_module_exported.h
+
+$(obj)/gki_module_protected.h: $(srctree)/android/abi_gki_modules_protected \
+				$(srctree)/scripts/gen_gki_modules_headers.sh
+	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/gen_gki_modules_headers.sh $@ \
+	"$(srctree)"
+
+$(obj)/gki_module_exported.h: $(srctree)/android/abi_gki_modules_exports \
+				$(srctree)/scripts/gen_gki_modules_headers.sh
+	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/gen_gki_modules_headers.sh $@ \
+	"$(srctree)"

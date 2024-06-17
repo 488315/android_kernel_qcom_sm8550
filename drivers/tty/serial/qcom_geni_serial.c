@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
-// Copyright (c) 2017-2018, The Linux foundation. All rights reserved.
+/*
+ * Copyright (c) 2017-2018, The Linux foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ */
+
+/* Disable MMIO tracing to prevent excessive logging of unwanted MMIO traces */
+#define __DISABLE_TRACE_MMIO__
 
 #include <linux/clk.h>
 #include <linux/console.h>
@@ -7,6 +13,7 @@
 #include <linux/iopoll.h>
 #include <linux/irq.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/pm_opp.h>
@@ -19,6 +26,10 @@
 #include <linux/slab.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
+#include <linux/pinctrl/consumer.h>
+
+static bool con_enabled = IS_ENABLED(CONFIG_SERIAL_QCOM_GENI_CONSOLE_DEFAULT_ENABLED);
+module_param(con_enabled, bool, 0644);
 
 /* UART specific GENI registers */
 #define SE_UART_LOOPBACK_CFG		0x22c
@@ -135,6 +146,7 @@ struct qcom_geni_serial_port {
 	int wakeup_irq;
 	bool rx_tx_swap;
 	bool cts_rts_swap;
+	bool is_console;
 
 	struct qcom_geni_private_data private_data;
 };
@@ -940,6 +952,7 @@ static int qcom_geni_serial_port_setup(struct uart_port *uport)
 			       false, true, true);
 	geni_se_init(&port->se, UART_RX_WM, port->rx_fifo_depth - 2);
 	geni_se_select_mode(&port->se, GENI_SE_FIFO);
+	qcom_geni_serial_start_rx(uport);
 	port->setup = true;
 
 	return 0;
@@ -1365,6 +1378,18 @@ static int qcom_geni_serial_probe(struct platform_device *pdev)
 		return PTR_ERR(port);
 	}
 
+	port->is_console = console;
+
+	if (console && !con_enabled) {
+		dev_err(&pdev->dev, "%s, Console Disabled\n", __func__);
+		ret = pinctrl_pm_select_sleep_state(&pdev->dev);
+		if (ret)
+			dev_err(&pdev->dev,
+				"failed to set pinctrl state to sleep %d\n", ret);
+		platform_set_drvdata(pdev, port);
+		return ret;
+	}
+
 	uport = &port->uport;
 	/* Don't allow 2 drivers to access the same port */
 	if (uport->private_data)
@@ -1481,6 +1506,12 @@ static int qcom_geni_serial_remove(struct platform_device *pdev)
 	struct qcom_geni_serial_port *port = platform_get_drvdata(pdev);
 	struct uart_driver *drv = port->private_data.drv;
 
+	/* Platform driver is registered for console and when console
+	 * is disabled from cmdline simply return success.
+	 */
+	if (port->is_console && !con_enabled)
+		return 0;
+
 	dev_pm_clear_wake_irq(&pdev->dev);
 	device_init_wakeup(&pdev->dev, false);
 	uart_remove_one_port(drv, &port->uport);
@@ -1490,9 +1521,18 @@ static int qcom_geni_serial_remove(struct platform_device *pdev)
 
 static int __maybe_unused qcom_geni_serial_sys_suspend(struct device *dev)
 {
+	struct uart_port *uport;
+	struct qcom_geni_private_data *private_data;
 	struct qcom_geni_serial_port *port = dev_get_drvdata(dev);
-	struct uart_port *uport = &port->uport;
-	struct qcom_geni_private_data *private_data = uport->private_data;
+
+	/* Platform driver is registered for console and when console
+	 * is disabled from cmdline simply return success.
+	 */
+	if (port->is_console && !con_enabled)
+		return 0;
+
+	uport = &port->uport;
+	private_data = uport->private_data;
 
 	/*
 	 * This is done so we can hit the lowest possible state in suspend
@@ -1508,9 +1548,18 @@ static int __maybe_unused qcom_geni_serial_sys_suspend(struct device *dev)
 static int __maybe_unused qcom_geni_serial_sys_resume(struct device *dev)
 {
 	int ret;
+	struct uart_port *uport;
+	struct qcom_geni_private_data *private_data;
 	struct qcom_geni_serial_port *port = dev_get_drvdata(dev);
-	struct uart_port *uport = &port->uport;
-	struct qcom_geni_private_data *private_data = uport->private_data;
+
+	/* Platform driver is registered for console and when console
+	 * is disabled from cmdline simply return success.
+	 */
+	if (port->is_console && !con_enabled)
+		return 0;
+
+	uport = &port->uport;
+	private_data = uport->private_data;
 
 	ret = uart_resume_port(private_data->drv, uport);
 	if (uart_console(uport)) {
@@ -1520,9 +1569,43 @@ static int __maybe_unused qcom_geni_serial_sys_resume(struct device *dev)
 	return ret;
 }
 
+static int qcom_geni_serial_sys_hib_resume(struct device *dev)
+{
+	int ret = 0;
+	struct uart_port *uport;
+	struct qcom_geni_private_data *private_data;
+	struct qcom_geni_serial_port *port = dev_get_drvdata(dev);
+
+	uport = &port->uport;
+	private_data = uport->private_data;
+
+	if (uart_console(uport)) {
+		geni_icc_set_tag(&port->se, 0x7);
+		geni_icc_set_bw(&port->se);
+		ret = uart_resume_port(private_data->drv, uport);
+		/*
+		 * For hibernation usecase clients for
+		 * console UART won't call port setup during restore,
+		 * hence call port setup for console uart.
+		 */
+		qcom_geni_serial_port_setup(uport);
+	} else {
+		/*
+		 * Peripheral register settings are lost during hibernation.
+		 * Update setup flag such that port setup happens again
+		 * during next session. Clients of HS-UART will close and
+		 * open the port during hibernation.
+		 */
+		port->setup = false;
+	}
+	return ret;
+}
+
 static const struct dev_pm_ops qcom_geni_serial_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(qcom_geni_serial_sys_suspend,
 					qcom_geni_serial_sys_resume)
+	.restore = qcom_geni_serial_sys_hib_resume,
+	.thaw = qcom_geni_serial_sys_hib_resume,
 };
 
 static const struct of_device_id qcom_geni_serial_match_table[] = {
@@ -1546,19 +1629,22 @@ static int __init qcom_geni_serial_init(void)
 {
 	int ret;
 
-	ret = console_register(&qcom_geni_console_driver);
+	ret = uart_register_driver(&qcom_geni_uart_driver);
 	if (ret)
 		return ret;
 
-	ret = uart_register_driver(&qcom_geni_uart_driver);
-	if (ret) {
-		console_unregister(&qcom_geni_console_driver);
-		return ret;
+	if (con_enabled) {
+		ret = console_register(&qcom_geni_console_driver);
+		if (ret) {
+			uart_unregister_driver(&qcom_geni_uart_driver);
+			return ret;
+		}
 	}
 
 	ret = platform_driver_register(&qcom_geni_serial_platform_driver);
 	if (ret) {
-		console_unregister(&qcom_geni_console_driver);
+		if (con_enabled)
+			console_unregister(&qcom_geni_console_driver);
 		uart_unregister_driver(&qcom_geni_uart_driver);
 	}
 	return ret;
@@ -1568,7 +1654,8 @@ module_init(qcom_geni_serial_init);
 static void __exit qcom_geni_serial_exit(void)
 {
 	platform_driver_unregister(&qcom_geni_serial_platform_driver);
-	console_unregister(&qcom_geni_console_driver);
+	if (con_enabled)
+		console_unregister(&qcom_geni_console_driver);
 	uart_unregister_driver(&qcom_geni_uart_driver);
 }
 module_exit(qcom_geni_serial_exit);

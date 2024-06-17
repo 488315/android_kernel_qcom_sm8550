@@ -14,6 +14,8 @@
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 
+#include <trace/hooks/audio_usboffload.h>
+
 #include "usbaudio.h"
 #include "card.h"
 #include "quirks.h"
@@ -95,6 +97,7 @@ find_format(struct list_head *fmt_list_head, snd_pcm_format_t format,
 	const struct audioformat *fp;
 	const struct audioformat *found = NULL;
 	int cur_attr = 0, attr;
+	bool need_ignore = false;
 
 	list_for_each_entry(fp, fmt_list_head, list) {
 		if (strict_match) {
@@ -114,6 +117,11 @@ find_format(struct list_head *fmt_list_head, snd_pcm_format_t format,
 				continue;
 		}
 		attr = fp->ep_attr & USB_ENDPOINT_SYNCTYPE;
+
+		trace_android_vh_audio_usb_offload_synctype(subs, attr, &need_ignore);
+		if (need_ignore)
+			continue;
+
 		if (!found) {
 			found = fp;
 			cur_attr = attr;
@@ -553,7 +561,13 @@ static int snd_usb_hw_params(struct snd_pcm_substream *substream,
 	subs->cur_audiofmt = fmt;
 	mutex_unlock(&chip->mutex);
 
-	ret = configure_endpoints(chip, subs);
+	if (subs->sync_endpoint) {
+		ret = snd_usb_endpoint_set_params(chip, subs->sync_endpoint);
+		if (ret < 0)
+			goto unlock;
+	}
+
+	ret = snd_usb_endpoint_set_params(chip, subs->data_endpoint);
 
  unlock:
 	if (ret < 0)
@@ -1566,6 +1580,7 @@ static int snd_usb_substream_playback_trigger(struct snd_pcm_substream *substrea
 {
 	struct snd_usb_substream *subs = substream->runtime->private_data;
 	int err;
+	bool suspend = true;
 
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
@@ -1593,6 +1608,10 @@ static int snd_usb_substream_playback_trigger(struct snd_pcm_substream *substrea
 			subs->cur_audiofmt->altsetting);
 		return 0;
 	case SNDRV_PCM_TRIGGER_SUSPEND:
+		trace_android_vh_audio_usb_offload_suspend(substream, cmd, &suspend);
+		if (!suspend)
+			return 0;
+		fallthrough;
 	case SNDRV_PCM_TRIGGER_STOP:
 		stop_endpoints(subs, substream->runtime->status->state == SNDRV_PCM_STATE_DRAINING);
 		snd_usb_endpoint_set_callback(subs->data_endpoint,

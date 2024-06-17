@@ -49,6 +49,7 @@
 #include <linux/fsnotify.h>
 #include <linux/irq_work.h>
 #include <linux/workqueue.h>
+#include <trace/hooks/ftrace_dump.h>
 
 #include "trace.h"
 #include "trace_output.h"
@@ -1714,8 +1715,7 @@ static void trace_create_maxlat_file(struct trace_array *tr,
 {
 	INIT_WORK(&tr->fsnotify_work, latency_fsnotify_workfn);
 	init_irq_work(&tr->fsnotify_irqwork, latency_fsnotify_workfn_irq);
-	tr->d_max_latency = trace_create_file("tracing_max_latency",
-					      TRACE_MODE_WRITE,
+	tr->d_max_latency = trace_create_file("tracing_max_latency", 0644,
 					      d_tracer, &tr->max_latency,
 					      &tracing_max_lat_fops);
 }
@@ -1748,8 +1748,8 @@ void latency_fsnotify(struct trace_array *tr)
 #else /* !LATENCY_FS_NOTIFY */
 
 #define trace_create_maxlat_file(tr, d_tracer)				\
-	trace_create_file("tracing_max_latency", TRACE_MODE_WRITE,	\
-			  d_tracer, &tr->max_latency, &tracing_max_lat_fops)
+	trace_create_file("tracing_max_latency", 0644, d_tracer,	\
+			  &tr->max_latency, &tracing_max_lat_fops)
 
 #endif
 
@@ -4232,10 +4232,9 @@ static void print_lat_help_header(struct seq_file *m)
 		    "#                  | / _----=> need-resched    \n"
 		    "#                  || / _---=> hardirq/softirq \n"
 		    "#                  ||| / _--=> preempt-depth   \n"
-		    "#                  |||| / _-=> migrate-disable \n"
-		    "#                  ||||| /     delay           \n"
-		    "#  cmd     pid     |||||| time  |   caller     \n"
-		    "#     \\   /        ||||||  \\    |    /       \n");
+		    "#                  |||| /     delay            \n"
+		    "#  cmd     pid     ||||| time  |   caller      \n"
+		    "#     \\   /        |||||  \\    |   /         \n");
 }
 
 static void print_event_info(struct array_buffer *buf, struct seq_file *m)
@@ -4273,10 +4272,9 @@ static void print_func_help_header_irq(struct array_buffer *buf, struct seq_file
 	seq_printf(m, "#                            %.*s / _----=> need-resched\n", prec, space);
 	seq_printf(m, "#                            %.*s| / _---=> hardirq/softirq\n", prec, space);
 	seq_printf(m, "#                            %.*s|| / _--=> preempt-depth\n", prec, space);
-	seq_printf(m, "#                            %.*s||| / _-=> migrate-disable\n", prec, space);
-	seq_printf(m, "#                            %.*s|||| /     delay\n", prec, space);
-	seq_printf(m, "#           TASK-PID  %.*s CPU#  |||||  TIMESTAMP  FUNCTION\n", prec, "     TGID   ");
-	seq_printf(m, "#              | |    %.*s   |   |||||     |         |\n", prec, "       |    ");
+	seq_printf(m, "#                            %.*s||| /     delay\n", prec, space);
+	seq_printf(m, "#           TASK-PID  %.*s CPU#  ||||   TIMESTAMP  FUNCTION\n", prec, "     TGID   ");
+	seq_printf(m, "#              | |    %.*s   |   ||||      |         |\n", prec, "       |    ");
 }
 
 void
@@ -5664,6 +5662,7 @@ static const char readme_msg[] =
 #ifdef CONFIG_HIST_TRIGGERS
 	"      hist trigger\t- If set, event hits are aggregated into a hash table\n"
 	"\t    Format: hist:keys=<field1[,field2,...]>\n"
+	"\t            [:<var1>=<field|var_ref|numeric_literal>[,<var2>=...]]\n"
 	"\t            [:values=<field1[,field2,...]>]\n"
 	"\t            [:sort=<field1[,field2,...]>]\n"
 	"\t            [:size=#entries]\n"
@@ -5674,6 +5673,16 @@ static const char readme_msg[] =
 	"\t    Note, special fields can be used as well:\n"
 	"\t            common_timestamp - to record current timestamp\n"
 	"\t            common_cpu - to record the CPU the event happened on\n"
+	"\n"
+	"\t    A hist trigger variable can be:\n"
+	"\t        - a reference to a field e.g. x=current_timestamp,\n"
+	"\t        - a reference to another variable e.g. y=$x,\n"
+	"\t        - a numeric literal: e.g. ms_per_sec=1000,\n"
+	"\t        - an arithmetic expression: e.g. time_secs=current_timestamp/1000\n"
+	"\n"
+	"\t    hist trigger aritmethic expressions support addition(+), subtraction(-),\n"
+	"\t    multiplication(*) and division(/) operators. An operand can be either a\n"
+	"\t    variable reference, field or numeric literal.\n"
 	"\n"
 	"\t    When a matching event is hit, an entry is added to a hash\n"
 	"\t    table using the key(s) and value(s) named, and the value of a\n"
@@ -6117,7 +6126,7 @@ trace_insert_eval_map_file(struct module *mod, struct trace_eval_map **start,
 
 static void trace_create_eval_file(struct dentry *d_tracer)
 {
-	trace_create_file("eval_map", TRACE_MODE_READ, d_tracer,
+	trace_create_file("eval_map", 0444, d_tracer,
 			  NULL, &tracing_eval_map_fops);
 }
 
@@ -8151,12 +8160,6 @@ static int tracing_buffers_release(struct inode *inode, struct file *file)
 
 	__trace_array_put(iter->tr);
 
-	iter->wait_index++;
-	/* Make sure the waiters see the new wait_index */
-	smp_wmb();
-
-	ring_buffer_wake_waiters(iter->array_buffer->buffer, iter->cpu_file);
-
 	if (info->spare)
 		ring_buffer_free_read_page(iter->array_buffer->buffer,
 					   info->spare_cpu, info->spare);
@@ -8310,8 +8313,6 @@ tracing_buffers_splice_read(struct file *file, loff_t *ppos,
 
 	/* did we read anything? */
 	if (!spd.nr_pages) {
-		long wait_index;
-
 		if (ret)
 			goto out;
 
@@ -8319,19 +8320,12 @@ tracing_buffers_splice_read(struct file *file, loff_t *ppos,
 		if ((file->f_flags & O_NONBLOCK) || (flags & SPLICE_F_NONBLOCK))
 			goto out;
 
-		wait_index = READ_ONCE(iter->wait_index);
-
 		ret = wait_on_pipe(iter, iter->tr->buffer_percent);
 		if (ret)
 			goto out;
 
 		/* No need to wait after waking up when tracing is off */
 		if (!tracer_tracing_is_on(iter->tr))
-			goto out;
-
-		/* Make sure we see the new wait_index */
-		smp_rmb();
-		if (wait_index != iter->wait_index)
 			goto out;
 
 		goto again;
@@ -8344,34 +8338,12 @@ out:
 	return ret;
 }
 
-/* An ioctl call with cmd 0 to the ring buffer file will wake up all waiters */
-static long tracing_buffers_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
-{
-	struct ftrace_buffer_info *info = file->private_data;
-	struct trace_iterator *iter = &info->iter;
-
-	if (cmd)
-		return -ENOIOCTLCMD;
-
-	mutex_lock(&trace_types_lock);
-
-	iter->wait_index++;
-	/* Make sure the waiters see the new wait_index */
-	smp_wmb();
-
-	ring_buffer_wake_waiters(iter->array_buffer->buffer, iter->cpu_file);
-
-	mutex_unlock(&trace_types_lock);
-	return 0;
-}
-
 static const struct file_operations tracing_buffers_fops = {
 	.open		= tracing_buffers_open,
 	.read		= tracing_buffers_read,
 	.poll		= tracing_buffers_poll,
 	.release	= tracing_buffers_release,
 	.splice_read	= tracing_buffers_splice_read,
-	.unlocked_ioctl = tracing_buffers_ioctl,
 	.llseek		= no_llseek,
 };
 
@@ -8697,27 +8669,27 @@ tracing_init_tracefs_percpu(struct trace_array *tr, long cpu)
 	}
 
 	/* per cpu trace_pipe */
-	trace_create_cpu_file("trace_pipe", TRACE_MODE_READ, d_cpu,
+	trace_create_cpu_file("trace_pipe", 0444, d_cpu,
 				tr, cpu, &tracing_pipe_fops);
 
 	/* per cpu trace */
-	trace_create_cpu_file("trace", TRACE_MODE_WRITE, d_cpu,
+	trace_create_cpu_file("trace", 0644, d_cpu,
 				tr, cpu, &tracing_fops);
 
-	trace_create_cpu_file("trace_pipe_raw", TRACE_MODE_READ, d_cpu,
+	trace_create_cpu_file("trace_pipe_raw", 0444, d_cpu,
 				tr, cpu, &tracing_buffers_fops);
 
-	trace_create_cpu_file("stats", TRACE_MODE_READ, d_cpu,
+	trace_create_cpu_file("stats", 0444, d_cpu,
 				tr, cpu, &tracing_stats_fops);
 
-	trace_create_cpu_file("buffer_size_kb", TRACE_MODE_READ, d_cpu,
+	trace_create_cpu_file("buffer_size_kb", 0444, d_cpu,
 				tr, cpu, &tracing_entries_fops);
 
 #ifdef CONFIG_TRACER_SNAPSHOT
-	trace_create_cpu_file("snapshot", TRACE_MODE_WRITE, d_cpu,
+	trace_create_cpu_file("snapshot", 0644, d_cpu,
 				tr, cpu, &snapshot_fops);
 
-	trace_create_cpu_file("snapshot_raw", TRACE_MODE_READ, d_cpu,
+	trace_create_cpu_file("snapshot_raw", 0444, d_cpu,
 				tr, cpu, &snapshot_raw_fops);
 #endif
 }
@@ -8923,8 +8895,8 @@ create_trace_option_file(struct trace_array *tr,
 	topt->opt = opt;
 	topt->tr = tr;
 
-	topt->entry = trace_create_file(opt->name, TRACE_MODE_WRITE,
-					t_options, topt, &trace_options_fops);
+	topt->entry = trace_create_file(opt->name, 0644, t_options, topt,
+				    &trace_options_fops);
 
 }
 
@@ -8999,7 +8971,7 @@ create_trace_option_core_file(struct trace_array *tr,
 	if (!t_options)
 		return NULL;
 
-	return trace_create_file(option, TRACE_MODE_WRITE, t_options,
+	return trace_create_file(option, 0644, t_options,
 				 (void *)&tr->trace_flags_index[index],
 				 &trace_options_core_fops);
 }
@@ -9525,28 +9497,28 @@ init_tracer_tracefs(struct trace_array *tr, struct dentry *d_tracer)
 	struct trace_event_file *file;
 	int cpu;
 
-	trace_create_file("available_tracers", TRACE_MODE_READ, d_tracer,
+	trace_create_file("available_tracers", 0444, d_tracer,
 			tr, &show_traces_fops);
 
-	trace_create_file("current_tracer", TRACE_MODE_WRITE, d_tracer,
+	trace_create_file("current_tracer", 0644, d_tracer,
 			tr, &set_tracer_fops);
 
-	trace_create_file("tracing_cpumask", TRACE_MODE_WRITE, d_tracer,
+	trace_create_file("tracing_cpumask", 0644, d_tracer,
 			  tr, &tracing_cpumask_fops);
 
-	trace_create_file("trace_options", TRACE_MODE_WRITE, d_tracer,
+	trace_create_file("trace_options", 0644, d_tracer,
 			  tr, &tracing_iter_fops);
 
-	trace_create_file("trace", TRACE_MODE_WRITE, d_tracer,
+	trace_create_file("trace", 0644, d_tracer,
 			  tr, &tracing_fops);
 
-	trace_create_file("trace_pipe", TRACE_MODE_READ, d_tracer,
+	trace_create_file("trace_pipe", 0444, d_tracer,
 			  tr, &tracing_pipe_fops);
 
-	trace_create_file("buffer_size_kb", TRACE_MODE_WRITE, d_tracer,
+	trace_create_file("buffer_size_kb", 0644, d_tracer,
 			  tr, &tracing_entries_fops);
 
-	trace_create_file("buffer_total_size_kb", TRACE_MODE_READ, d_tracer,
+	trace_create_file("buffer_total_size_kb", 0444, d_tracer,
 			  tr, &tracing_total_entries_fops);
 
 	trace_create_file("free_buffer", 0200, d_tracer,
@@ -9557,25 +9529,25 @@ init_tracer_tracefs(struct trace_array *tr, struct dentry *d_tracer)
 
 	file = __find_event_file(tr, "ftrace", "print");
 	if (file && file->dir)
-		trace_create_file("trigger", TRACE_MODE_WRITE, file->dir,
-				  file, &event_trigger_fops);
+		trace_create_file("trigger", 0644, file->dir, file,
+				  &event_trigger_fops);
 	tr->trace_marker_file = file;
 
 	trace_create_file("trace_marker_raw", 0220, d_tracer,
 			  tr, &tracing_mark_raw_fops);
 
-	trace_create_file("trace_clock", TRACE_MODE_WRITE, d_tracer, tr,
+	trace_create_file("trace_clock", 0644, d_tracer, tr,
 			  &trace_clock_fops);
 
-	trace_create_file("tracing_on", TRACE_MODE_WRITE, d_tracer,
+	trace_create_file("tracing_on", 0644, d_tracer,
 			  tr, &rb_simple_fops);
 
-	trace_create_file("timestamp_mode", TRACE_MODE_READ, d_tracer, tr,
+	trace_create_file("timestamp_mode", 0444, d_tracer, tr,
 			  &trace_time_stamp_mode_fops);
 
 	tr->buffer_percent = 50;
 
-	trace_create_file("buffer_percent", TRACE_MODE_WRITE, d_tracer,
+	trace_create_file("buffer_percent", 0640, d_tracer,
 			tr, &buffer_percent_fops);
 
 	create_trace_options_dir(tr);
@@ -9588,11 +9560,11 @@ init_tracer_tracefs(struct trace_array *tr, struct dentry *d_tracer)
 		MEM_FAIL(1, "Could not allocate function filter files");
 
 #ifdef CONFIG_TRACER_SNAPSHOT
-	trace_create_file("snapshot", TRACE_MODE_WRITE, d_tracer,
+	trace_create_file("snapshot", 0644, d_tracer,
 			  tr, &snapshot_fops);
 #endif
 
-	trace_create_file("error_log", TRACE_MODE_WRITE, d_tracer,
+	trace_create_file("error_log", 0644, d_tracer,
 			  tr, &tracing_err_log_fops);
 
 	for_each_tracing_cpu(cpu)
@@ -9785,19 +9757,19 @@ static __init int tracer_init_tracefs(void)
 	init_tracer_tracefs(&global_trace, NULL);
 	ftrace_init_tracefs_toplevel(&global_trace, NULL);
 
-	trace_create_file("tracing_thresh", TRACE_MODE_WRITE, NULL,
+	trace_create_file("tracing_thresh", 0644, NULL,
 			&global_trace, &tracing_thresh_fops);
 
-	trace_create_file("README", TRACE_MODE_READ, NULL,
+	trace_create_file("README", 0444, NULL,
 			NULL, &tracing_readme_fops);
 
-	trace_create_file("saved_cmdlines", TRACE_MODE_READ, NULL,
+	trace_create_file("saved_cmdlines", 0444, NULL,
 			NULL, &tracing_saved_cmdlines_fops);
 
-	trace_create_file("saved_cmdlines_size", TRACE_MODE_WRITE, NULL,
+	trace_create_file("saved_cmdlines_size", 0644, NULL,
 			  NULL, &tracing_saved_cmdlines_size_fops);
 
-	trace_create_file("saved_tgids", TRACE_MODE_READ, NULL,
+	trace_create_file("saved_tgids", 0444, NULL,
 			NULL, &tracing_saved_tgids_fops);
 
 	trace_eval_init();
@@ -9809,7 +9781,7 @@ static __init int tracer_init_tracefs(void)
 #endif
 
 #ifdef CONFIG_DYNAMIC_FTRACE
-	trace_create_file("dyn_ftrace_total_info", TRACE_MODE_READ, NULL,
+	trace_create_file("dyn_ftrace_total_info", 0444, NULL,
 			NULL, &tracing_dyn_info_fops);
 #endif
 
@@ -9825,8 +9797,17 @@ fs_initcall(tracer_init_tracefs);
 static int trace_panic_handler(struct notifier_block *this,
 			       unsigned long event, void *unused)
 {
+	bool ftrace_check = false;
+
+	trace_android_vh_ftrace_oops_enter(&ftrace_check);
+
+	if (ftrace_check)
+		return NOTIFY_OK;
+
 	if (ftrace_dump_on_oops)
 		ftrace_dump(ftrace_dump_on_oops);
+
+	trace_android_vh_ftrace_oops_exit(&ftrace_check);
 	return NOTIFY_OK;
 }
 
@@ -9840,6 +9821,13 @@ static int trace_die_handler(struct notifier_block *self,
 			     unsigned long val,
 			     void *data)
 {
+	bool ftrace_check = false;
+
+	trace_android_vh_ftrace_oops_enter(&ftrace_check);
+
+	if (ftrace_check)
+		return NOTIFY_OK;
+
 	switch (val) {
 	case DIE_OOPS:
 		if (ftrace_dump_on_oops)
@@ -9848,6 +9836,8 @@ static int trace_die_handler(struct notifier_block *self,
 	default:
 		break;
 	}
+
+	trace_android_vh_ftrace_oops_exit(&ftrace_check);
 	return NOTIFY_OK;
 }
 
@@ -9872,6 +9862,8 @@ static struct notifier_block trace_die_notifier = {
 void
 trace_printk_seq(struct trace_seq *s)
 {
+	bool dump_printk = true;
+
 	/* Probably should print a warning here. */
 	if (s->seq.len >= TRACE_MAX_PRINT)
 		s->seq.len = TRACE_MAX_PRINT;
@@ -9887,7 +9879,9 @@ trace_printk_seq(struct trace_seq *s)
 	/* should be zero ended, but we are paranoid. */
 	s->buffer[s->seq.len] = 0;
 
-	printk(KERN_TRACE "%s", s->buffer);
+	trace_android_vh_ftrace_dump_buffer(s, &dump_printk);
+	if (dump_printk)
+		printk(KERN_TRACE "%s", s->buffer);
 
 	trace_seq_init(s);
 }
@@ -9926,6 +9920,8 @@ void ftrace_dump(enum ftrace_dump_mode oops_dump_mode)
 	unsigned int old_userobj;
 	unsigned long flags;
 	int cnt = 0, cpu;
+	bool ftrace_check = false;
+	unsigned long size;
 
 	/* Only allow one dump user at a time. */
 	if (atomic_inc_return(&dump_running) != 1) {
@@ -9950,12 +9946,17 @@ void ftrace_dump(enum ftrace_dump_mode oops_dump_mode)
 
 	for_each_tracing_cpu(cpu) {
 		atomic_inc(&per_cpu_ptr(iter.array_buffer->data, cpu)->disabled);
+		size = ring_buffer_size(iter.array_buffer->buffer, cpu);
+		trace_android_vh_ftrace_size_check(size, &ftrace_check);
 	}
 
 	old_userobj = tr->trace_flags & TRACE_ITER_SYM_USEROBJ;
 
 	/* don't look at user memory in panic mode */
 	tr->trace_flags &= ~TRACE_ITER_SYM_USEROBJ;
+
+	if (ftrace_check)
+		goto out_enable;
 
 	switch (oops_dump_mode) {
 	case DUMP_ALL:
@@ -9987,6 +9988,7 @@ void ftrace_dump(enum ftrace_dump_mode oops_dump_mode)
 	 */
 
 	while (!trace_empty(&iter)) {
+		ftrace_check = true;
 
 		if (!cnt)
 			printk(KERN_TRACE "---------------------------------\n");
@@ -9994,7 +9996,9 @@ void ftrace_dump(enum ftrace_dump_mode oops_dump_mode)
 		cnt++;
 
 		trace_iterator_reset(&iter);
-		iter.iter_flags |= TRACE_FILE_LAT_FMT;
+		trace_android_vh_ftrace_format_check(&ftrace_check);
+		if (ftrace_check)
+			iter.iter_flags |= TRACE_FILE_LAT_FMT;
 
 		if (trace_find_next_entry_inc(&iter) != NULL) {
 			int ret;

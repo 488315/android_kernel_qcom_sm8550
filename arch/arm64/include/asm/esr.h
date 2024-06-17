@@ -112,6 +112,7 @@
 #define ESR_ELx_FSC_ACCESS	(0x08)
 #define ESR_ELx_FSC_FAULT	(0x04)
 #define ESR_ELx_FSC_PERM	(0x0C)
+#define ESR_ELx_FSC_TLBCONF	(0x30)
 
 /* ISS field definitions for Data Aborts */
 #define ESR_ELx_ISV_SHIFT	(24)
@@ -324,14 +325,14 @@
 #ifndef __ASSEMBLY__
 #include <asm/types.h>
 
-static inline bool esr_is_data_abort(unsigned long esr)
+static inline bool esr_is_data_abort(u32 esr)
 {
-	const unsigned long ec = ESR_ELx_EC(esr);
+	const u32 ec = ESR_ELx_EC(esr);
 
 	return ec == ESR_ELx_EC_DABT_LOW || ec == ESR_ELx_EC_DABT_CUR;
 }
 
-const char *esr_get_class_string(unsigned long esr);
+const char *esr_get_class_string(u32 esr);
 #endif /* __ASSEMBLY */
 
 #endif /* __ASM_ESR_H */
