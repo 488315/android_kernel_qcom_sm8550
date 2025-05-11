@@ -1190,10 +1190,6 @@ export extmod_prefix = $(if $(KBUILD_EXTMOD),$(KBUILD_EXTMOD)/)
 export MODORDER := $(extmod_prefix)modules.order
 export MODULES_NSDEPS := $(extmod_prefix)modules.nsdeps
 
-ext-mod-dir := ../sm8550-modules
-ext-mod-dirs := $(ext-mod-dir)/qcom/opensource/audio-kernel $(ext-mod-dir)/qcom/opensource/display-drivers $(ext-mod-dir)/qcom/opensource/video-kernel $(ext-mod-dir)/nxp/opensource/driver
-ext-mod-dirs := $(subst $(srctree)/,,$(ext-mod-dirs))
-
 # ---------------------------------------------------------------------------
 # Kernel headers
 
@@ -1227,9 +1223,6 @@ ifeq ($(KBUILD_EXTMOD),)
 endif
 	$(Q)$(MAKE) $(hdr-inst)=$(hdr-prefix)include/uapi
 	$(Q)$(MAKE) $(hdr-inst)=$(hdr-prefix)arch/$(SRCARCH)/include/uapi
-	$(Q)for d in $(ext-mod-dirs); do \
-		$(MAKE) $(hdr-inst)=$$d/include/uapi; \
-	done
 
 # ---------------------------------------------------------------------------
 # Devicetree files
