@@ -5,7 +5,7 @@
  * Copyright (C) 2016-2018 Linaro Ltd.
  * Copyright (C) 2014 Sony Mobile Communications AB
  * Copyright (c) 2012-2013, 2020-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/kernel.h>
@@ -83,16 +83,13 @@ static void qcom_q6v5_crash_handler_work(struct work_struct *work)
 	}
 
 	mutex_lock(&rproc->lock);
-
-	rproc->state = RPROC_CRASHED;
-
-	votes = atomic_xchg(&rproc->power, 0);
-	/* if votes are zero, rproc has already been shutdown */
-	if (votes == 0) {
+	votes = atomic_read(&rproc->power);
+	if (votes == 0 || q6v5->crash_seq != q6v5->seq) {
 		mutex_unlock(&rproc->lock);
 		return;
 	}
 
+	rproc->state = RPROC_CRASHED;
 	list_for_each_entry_reverse(subdev, &rproc->subdevs, node) {
 		if (subdev->stop)
 			subdev->stop(subdev, true);
@@ -124,6 +121,7 @@ static irqreturn_t q6v5_wdog_interrupt(int irq, void *data)
 		return IRQ_HANDLED;
 	}
 
+	q6v5->crash_seq = q6v5->seq;
 	msg = qcom_smem_get(QCOM_SMEM_HOST_ANY, q6v5->crash_reason, &len);
 	if (!IS_ERR(msg) && len > 0 && msg[0]) {
 		dev_err(q6v5->dev, "watchdog received: %s\n", msg);
@@ -179,6 +177,7 @@ static irqreturn_t q6v5_fatal_interrupt(int irq, void *data)
 		return IRQ_HANDLED;
 	}
 
+	q6v5->crash_seq = q6v5->seq;
 	msg = qcom_smem_get(QCOM_SMEM_HOST_ANY, q6v5->crash_reason, &len);
 	if (!IS_ERR(msg) && len > 0 && msg[0]) {
 		dev_err(q6v5->dev, "fatal error received: %s\n", msg);
@@ -187,7 +186,7 @@ static irqreturn_t q6v5_fatal_interrupt(int irq, void *data)
 		chk_name = strstr(q6v5->rproc->name, "adsp");
 		if (chk_name != NULL) {
 			ssr_reason_call_back(msg, len);
-			if (strstr(msg, "IPLSREVOCER")) {
+			if (strstr(msg, "IPLSREVOCER") || strstr(msg, "SLIMBUS_PM_ERR_FATAL_V01")) {
 				q6v5->rproc->fssr = true;
 				q6v5->rproc->prev_recovery_disabled = 
 					q6v5->rproc->recovery_disabled;
@@ -377,69 +376,85 @@ int qcom_q6v5_init(struct qcom_q6v5 *q6v5, struct platform_device *pdev,
 
 
 	q6v5->wdog_irq = platform_get_irq_byname(pdev, "wdog");
-	if (q6v5->wdog_irq < 0)
+	if (q6v5->wdog_irq < 0 && q6v5->wdog_irq != -ENXIO)
 		return q6v5->wdog_irq;
-
-	ret = devm_request_threaded_irq(&pdev->dev, q6v5->wdog_irq,
-					NULL, q6v5_wdog_interrupt,
-					IRQF_ONESHOT,
-					"q6v5 wdog", q6v5);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to acquire wdog IRQ\n");
-		return ret;
+	else if (q6v5->wdog_irq == -ENXIO) {
+		dev_warn(&pdev->dev, "wdog_irq not found in dt\n");
+	} else {
+		ret = devm_request_threaded_irq(&pdev->dev, q6v5->wdog_irq,
+				NULL, q6v5_wdog_interrupt,
+				IRQF_ONESHOT,
+				"q6v5 wdog", q6v5);
+		if (ret) {
+			dev_err(&pdev->dev, "failed to acquire wdog IRQ\n");
+			return ret;
+		}
 	}
 
 	q6v5->fatal_irq = platform_get_irq_byname(pdev, "fatal");
-	if (q6v5->fatal_irq < 0)
+	if (q6v5->fatal_irq < 0 && q6v5->fatal_irq != -ENXIO)
 		return q6v5->fatal_irq;
-
-	ret = devm_request_threaded_irq(&pdev->dev, q6v5->fatal_irq,
-					NULL, q6v5_fatal_interrupt,
-					IRQF_TRIGGER_RISING | IRQF_ONESHOT,
-					"q6v5 fatal", q6v5);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to acquire fatal IRQ\n");
-		return ret;
+	else if (q6v5->fatal_irq == -ENXIO) {
+		dev_warn(&pdev->dev, "fatal_irq not found int dt\n");
+	} else {
+		ret = devm_request_threaded_irq(&pdev->dev, q6v5->fatal_irq,
+				NULL, q6v5_fatal_interrupt,
+				IRQF_TRIGGER_RISING | IRQF_ONESHOT,
+				"q6v5 fatal", q6v5);
+		if (ret) {
+			dev_err(&pdev->dev, "failed to acquire fatal IRQ\n");
+			return ret;
+		}
 	}
 
 	q6v5->ready_irq = platform_get_irq_byname(pdev, "ready");
-	if (q6v5->ready_irq < 0)
+	if (q6v5->ready_irq < 0 && q6v5->ready_irq != -ENXIO)
 		return q6v5->ready_irq;
-
-	ret = devm_request_threaded_irq(&pdev->dev, q6v5->ready_irq,
-					NULL, q6v5_ready_interrupt,
-					IRQF_TRIGGER_RISING | IRQF_ONESHOT,
-					"q6v5 ready", q6v5);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to acquire ready IRQ\n");
-		return ret;
+	else if (q6v5->ready_irq == -ENXIO) {
+		dev_warn(&pdev->dev, "ready_irq not found int dt\n");
+	} else {
+		ret = devm_request_threaded_irq(&pdev->dev, q6v5->ready_irq,
+				NULL, q6v5_ready_interrupt,
+				IRQF_TRIGGER_RISING | IRQF_ONESHOT,
+				"q6v5 ready", q6v5);
+		if (ret) {
+			dev_err(&pdev->dev, "failed to acquire ready IRQ\n");
+			return ret;
+		}
 	}
 
 	q6v5->handover_irq = platform_get_irq_byname(pdev, "handover");
-	if (q6v5->handover_irq < 0)
+	if (q6v5->handover_irq < 0 && q6v5->handover_irq != -ENXIO)
 		return q6v5->handover_irq;
-
-	ret = devm_request_threaded_irq(&pdev->dev, q6v5->handover_irq,
-					NULL, q6v5_handover_interrupt,
-					IRQF_TRIGGER_RISING | IRQF_ONESHOT,
-					"q6v5 handover", q6v5);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to acquire handover IRQ\n");
-		return ret;
+	else if (q6v5->handover_irq == -ENXIO) {
+		dev_warn(&pdev->dev, "handover_irq not found int dt\n");
+	} else {
+		ret = devm_request_threaded_irq(&pdev->dev, q6v5->handover_irq,
+				NULL, q6v5_handover_interrupt,
+				IRQF_TRIGGER_RISING | IRQF_ONESHOT,
+				"q6v5 handover", q6v5);
+		if (ret) {
+			dev_err(&pdev->dev, "failed to acquire handover IRQ\n");
+			return ret;
+		}
+		disable_irq(q6v5->handover_irq);
 	}
-	disable_irq(q6v5->handover_irq);
+
 
 	q6v5->stop_irq = platform_get_irq_byname(pdev, "stop-ack");
-	if (q6v5->stop_irq < 0)
+	if (q6v5->stop_irq < 0 && q6v5->stop_irq != -ENXIO)
 		return q6v5->stop_irq;
-
-	ret = devm_request_threaded_irq(&pdev->dev, q6v5->stop_irq,
-					NULL, q6v5_stop_interrupt,
-					IRQF_TRIGGER_RISING | IRQF_ONESHOT,
-					"q6v5 stop", q6v5);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to acquire stop-ack IRQ\n");
-		return ret;
+	else if (q6v5->stop_irq == -ENXIO) {
+		dev_warn(&pdev->dev, "stop_irq not found int dt\n");
+	} else {
+		ret = devm_request_threaded_irq(&pdev->dev, q6v5->stop_irq,
+						NULL, q6v5_stop_interrupt,
+						IRQF_TRIGGER_RISING | IRQF_ONESHOT,
+						"q6v5 stop", q6v5);
+		if (ret) {
+			dev_err(&pdev->dev, "failed to acquire stop-ack IRQ\n");
+			return ret;
+		}
 	}
 
 	q6v5->state = qcom_smem_state_get(&pdev->dev, "stop", &q6v5->stop_bit);

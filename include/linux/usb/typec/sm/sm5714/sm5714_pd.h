@@ -225,6 +225,7 @@ enum usbpd_data_msg_type {
 	USBPD_Alert					= 0x6,
 	USBPD_Get_Country_Info		= 0x7,
 	USBPD_Source_Info			= 0xB,
+	USBPD_Revision				= 0xC,
 	USBPD_Vendor_Defined		= 0xF,
 };
 
@@ -422,7 +423,7 @@ typedef enum {
 	PE_Get_Battery_Cap	= 0xE7,
 	PE_Give_Battery_Cap	= 0xE8,
 	PE_Get_Battery_Status	= 0xE9,
-	PE_SNK_Give_Battery_Status	= 0xEA,
+	PE_Give_Battery_Status	= 0xEA,
 	PE_Get_Manufacturer_Info	= 0xEB,
 	PE_Give_Manufacturer_Info	= 0xEC,
 
@@ -437,6 +438,8 @@ typedef enum {
 	PE_Send_Firmware_Update_Response	= 0x15,
 	PE_Firmware_Update_Response_Received	= 0x16,
 	PE_SRC_Send_Source_Info	= 0x17,
+	PE_Give_Revision		= 0x18,
+	PE_SNK_Give_Sink_Cap_Ext	= 0x19,
 
 	Error_Recovery			= 0xFF
 } policy_state;
@@ -542,7 +545,8 @@ enum usbpd_msg_status {
 	MSG_COUNTRY_CODES		= 54,
 	MSG_SNK_CAP_EXT			= 55,
 	MSG_GET_SRC_INFO		= 56,
-	MSG_RESERVED			= 57,
+	MSG_GET_REVISION		= 57,
+	MSG_RESERVED			= 58,
 };
 
 /* Timer */
@@ -588,6 +592,15 @@ typedef union {
 	u32 object;
 	u16 word[2];
 	u8  byte[4];
+
+	struct {
+		unsigned data_size:9;
+		unsigned reserved:1;
+		unsigned request_chunk:1;
+		unsigned chunk_number:4;
+		unsigned chunked:1;
+		unsigned data : 16;
+	} extended_msg_header;
 
 	struct {
 		unsigned:30;
@@ -787,6 +800,48 @@ typedef union {
 	} bist_data_object;
 
 	struct{
+		unsigned reserved:16;
+		unsigned VID:16;
+	} sink_capabilities_extended_data1;
+
+	struct{
+		unsigned PID:16;
+		unsigned XID1:16;
+	} sink_capabilities_extended_data2;
+
+	struct{
+		unsigned XID2:16;
+		unsigned fw_version:8;
+		unsigned hw_version:8;
+	} sink_capabilities_extended_data3;
+
+	struct{
+		unsigned skedb_version:8;
+		unsigned load_step:8;
+		unsigned sink_load_characteristics:16;
+	} sink_capabilities_extended_data4;
+
+	struct{
+		unsigned compliance:8;
+		unsigned torch_temp:8;
+		unsigned battery_info:8;
+		unsigned sink_mode:8;
+	} sink_capabilities_extended_data5;
+
+	struct{
+		unsigned sink_minimum_pdp:8;
+		unsigned sink_operational_pdp:8;
+		unsigned sink_maximum_pdp:8;
+		unsigned epr_sink_minimum_pdp:8;
+	} sink_capabilities_extended_data6;
+
+	struct {
+		unsigned epr_sink_operational_pdp:8;
+		unsigned epr_sink_maximum_pdp:8;
+		unsigned reserved:16;
+	} sink_capabilities_extended_data7;
+
+	struct{
 		unsigned VID:16;
 		unsigned PID:16;
 	} source_capabilities_extended_data1;
@@ -821,6 +876,32 @@ typedef union {
 	} source_capabilities_extended_data6;
 
 	struct{
+		unsigned battery_cap_ref:16;
+		unsigned reserved:16;
+	} get_battery_cap_data;
+
+	struct{
+		unsigned battery_status_ref:16;
+		unsigned reserved:16;
+	} get_battery_status_data;
+
+	struct{
+		unsigned reserved:16;
+		unsigned VID:16;
+	} battery_capabilities1;
+
+	struct {
+		unsigned PID:16;
+		unsigned Battery_Design_Capacity:16;
+	} battery_capabilities2;
+
+	struct {
+		unsigned Last_Full_Charge:16;
+		unsigned Battery_Type:8;
+		unsigned reserved:8;
+	} battery_capabilities3;
+
+	struct{
 		unsigned reserved:8;
 		unsigned batt_info_invalid_batt_ref:1;
 		unsigned batt_info_batt_present:1;
@@ -836,6 +917,14 @@ typedef union {
 		unsigned reserved:7;
 		unsigned port_type:1;
 	} source_info;
+
+	struct{
+		unsigned reserved:16;
+		unsigned version_minor:4;
+		unsigned version_major:4;
+		unsigned revision_minor:4;
+		unsigned revision_major:4;
+	} revision_message;
 } data_obj_type;
 
 typedef union {
@@ -1005,7 +1094,12 @@ struct sm5714_usbpd_data {
 	int			thermal_state;
 	int			auth_type;
 	int			d2d_type;
+#ifndef CONFIG_DISABLE_LOCKSCREEN_USB_RESTRICTION	
+	bool		altmode_enable;
+#endif
+#if IS_ENABLED(CONFIG_BATTERY_SAMSUNG)
 	struct pdic_notifier_struct pd_noti;
+#endif
 };
 
 static inline struct sm5714_usbpd_data *protocol_rx_to_usbpd(
@@ -1105,4 +1199,7 @@ extern int dwc3_restart_usb_host_mode_hs(void);
 void sm5714_usbpd_change_source_cap(int enable, int max_cur, int init);
 void sm5714_usbpd_turn_on_reverse_booster(struct sm5714_usbpd_data *pd_data);
 void sm5714_usbpd_turn_off_reverse_booster(struct sm5714_usbpd_data *pd_data);
+#ifndef CONFIG_DISABLE_LOCKSCREEN_USB_RESTRICTION
+void sm5714_set_enable_alternate_mode(int mode);
+#endif
 #endif

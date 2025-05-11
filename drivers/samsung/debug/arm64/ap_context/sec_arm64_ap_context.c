@@ -225,7 +225,8 @@ static void __ap_context_free_client(struct builder *bd)
 	ssize_t type;
 
 	type = __ap_context_unique_id_to_type(drvdata->unique_id);
-	BUG_ON(type < 0 || type >= TYPE_VH_MAX);
+	if (type >= TYPE_VH_MAX || type < 0)
+		return;
 
 	ap_context[type] = NULL;
 
@@ -361,7 +362,7 @@ static int __naked sec_arm64_ap_context_on_panic(struct notifier_block *nb,
 		"bl	__sec_arm64_ap_context_on_panic \n\t"
 
 		"add	sp, sp, %0 \n\t"
-		"ldp	x0, x30, [sp], #0x10 \n\t"
+		"ldp	x1, x30, [sp], #0x10 \n\t"
 		"ret \n\t"
 		:
 		: "i"(sizeof(struct pt_regs))

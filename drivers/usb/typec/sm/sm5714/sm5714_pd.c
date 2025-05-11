@@ -1200,6 +1200,7 @@ void sm5714_usbpd_power_ready(struct device *dev,
 		mode = sm5714_get_pd_support(pdic_data);
 		typec_set_pwr_opmode(pdic_data->port, mode);
 #endif
+		send_otg_notify(get_otg_notify(), NOTIFY_EVENT_PD_CONTRACT, 1);
 	}
 
 #if IS_ENABLED(CONFIG_BATTERY_SAMSUNG)
@@ -1326,10 +1327,76 @@ void sm5714_usbpd_inform_event(struct sm5714_usbpd_data *pd_data,
 	}
 }
 
+#ifndef CONFIG_DISABLE_LOCKSCREEN_USB_RESTRICTION
+void sm5714_set_enable_alternate_mode(int mode)
+{
+	struct sm5714_usbpd_data *pd_data = sm5714_g_pd_data;	
+	struct sm5714_usbpd_manager_data *manager = &pd_data->manager;
+	static int check_is_driver_loaded;
+	static int prev_alternate_mode;
+	int data_role = 0;
+
+	if ((mode & ALTERNATE_MODE_NOT_READY) &&
+	    (mode & ALTERNATE_MODE_READY)) {
+		pr_info("%s: mode is invalid!", __func__);
+		return;
+	}
+	if ((mode & ALTERNATE_MODE_START) && (mode & ALTERNATE_MODE_STOP)) {
+		pr_info("%s: mode is invalid!", __func__);
+		return;
+	}
+	if (mode & ALTERNATE_MODE_RESET) {
+		pr_info("%s: mode is reset! check_is_driver_loaded=%d, prev_alternate_mode=%d",
+			__func__, check_is_driver_loaded, prev_alternate_mode);
+		if (check_is_driver_loaded &&
+		    (prev_alternate_mode == ALTERNATE_MODE_START)) {
+
+			pr_info("%s: [No process] alternate mode is reset as start!", __func__);
+			prev_alternate_mode = ALTERNATE_MODE_START;
+		} else if (check_is_driver_loaded &&
+			   (prev_alternate_mode == ALTERNATE_MODE_STOP)) {
+			pr_info("%s: [No process] alternate mode is reset as stop!", __func__);
+			prev_alternate_mode = ALTERNATE_MODE_STOP;
+		} else {
+			;
+		}
+	} else {
+		if (mode & ALTERNATE_MODE_NOT_READY) {
+			check_is_driver_loaded = 0;
+			pr_info("%s: alternate mode is not ready!", __func__);
+		} else if (mode & ALTERNATE_MODE_READY) {
+			check_is_driver_loaded = 1;
+			pr_info("%s: alternate mode is ready!", __func__);
+		} else {
+			;
+		}
+
+		if (mode & ALTERNATE_MODE_START) {
+			pd_data->altmode_enable = 1;
+			prev_alternate_mode = ALTERNATE_MODE_START;
+			pr_info("%s: alternate mode is started!\n", __func__);
+			pd_data->phy_ops.get_data_role(pd_data, &data_role);
+			if (data_role == USBPD_DFP) {
+				manager->alt_sended = 0;
+				manager->vdm_en = 0;
+				pr_info("%s : request vdm for DFP\n", __func__);
+				sm5714_usbpd_vdm_request_enabled(pd_data);
+			}
+		} else if (mode & ALTERNATE_MODE_STOP) {
+			pd_data->altmode_enable = 0;
+			pr_info("%s: alternate mode is stopped!\n", __func__);
+		}
+	}
+}
+#endif
+
 bool sm5714_usbpd_vdm_request_enabled(struct sm5714_usbpd_data *pd_data)
 {
 	struct sm5714_usbpd_manager_data *manager = &pd_data->manager;
 
+#ifndef CONFIG_DISABLE_LOCKSCREEN_USB_RESTRICTION
+	pr_info("%s: alt_sended : %d, vdm_en : %d\n", __func__, manager->alt_sended, manager->vdm_en);
+#endif
 	if (manager->alt_sended == 1 && manager->vdm_en == 1)
 		return true;
 
@@ -1660,6 +1727,7 @@ int sm5714_usbpd_evaluate_capability(struct sm5714_usbpd_data *pd_data)
 #endif
 	data_obj_type *pd_obj;
 	int min_volt = 0, max_volt = 0, max_current = 0, max_power = 0;
+	int usb_comm_capable = 0;
 
 #if IS_ENABLED(CONFIG_PDIC_PD30)
 	pd_data->specification_revision =
@@ -1699,6 +1767,8 @@ int sm5714_usbpd_evaluate_capability(struct sm5714_usbpd_data *pd_data)
 						pd_obj->power_data_obj.usb_comm_capable;
 			pdic_sink_status->power_list[i + 1].suspend =
 						pd_obj->power_data_obj.usb_suspend_support;
+			if (!usb_comm_capable)
+				usb_comm_capable = !!pd_obj->power_data_obj.usb_comm_capable;
 			break;
 		case POWER_TYPE_BATTERY:
 			min_volt = pd_obj->power_data_obj_battery.min_voltage * USBPD_VOLT_UNIT;
@@ -1757,6 +1827,13 @@ int sm5714_usbpd_evaluate_capability(struct sm5714_usbpd_data *pd_data)
 			break;
 		}
 	}
+
+#if IS_ENABLED(CONFIG_USE_USB_COMMUNICATIONS_CAPABLE)
+	if (usb_comm_capable)
+		send_otg_notify(get_otg_notify(), NOTIFY_EVENT_PD_USB_COMM_CAPABLE, USB_NOTIFY_COMM_CAPABLE);
+	else
+		send_otg_notify(get_otg_notify(), NOTIFY_EVENT_PD_USB_COMM_CAPABLE, USB_NOTIFY_NO_COMM_CAPABLE);
+#endif
 
 	if (pdic_sink_status->rp_currentlvl == RP_CURRENT_ABNORMAL) {
 		available_pdo_num = 1;
@@ -2145,13 +2222,16 @@ void sm5714_usbpd_protocol_rx(struct sm5714_usbpd_data *pd_data)
 				pdic_data->status_reg |= BITMSG(MSG_NONE);
 				break;
 			case USBPD_Get_Battery_Cap:
-				pdic_data->status_reg |= BITMSG(MSG_GET_BAT_CAP);
+				if (pd_data->policy.rx_data_obj[0].get_battery_cap_data.battery_cap_ref >= 8)
+					pdic_data->status_reg |= BITMSG(MSG_NOT_SUPPORTED);
+				else
+					pdic_data->status_reg |= BITMSG(MSG_GET_BAT_CAP);
 				break;
 			case USBPD_Get_Batt_Status:
 				pdic_data->status_reg |= BITMSG(MSG_GET_BAT_STATUS);
 				break;
 			case USBPD_Battery_Cap:
-				pdic_data->status_reg |= BITMSG(MSG_GET_BAT_CAP);
+					pdic_data->status_reg |= BITMSG(MSG_BAT_CAP);
 				break;
 			case USBPD_Get_Manuf_Info:
 				pdic_data->status_reg |= BITMSG(MSG_GET_MANUF_INFO);
@@ -2277,9 +2357,11 @@ void sm5714_usbpd_protocol_rx(struct sm5714_usbpd_data *pd_data)
 			case USBPD_Soft_Reset:
 				pdic_data->status_reg |= BITMSG(MSG_SOFTRESET);
 				break;
-			case USBPD_Data_Reset: /* (Reserved, in PD2 mode) */
+			case USBPD_Data_Reset:
 				if (pd_data->policy.rx_msg_header.spec_revision == USBPD_REV_20)
 					pdic_data->status_reg |= BITMSG(MSG_REJECT);
+				else
+				pdic_data->status_reg |= BITMSG(MSG_RESERVED);
 				break;
 			case USBPD_Not_Supported:
 				pdic_data->status_reg |= BITMSG(MSG_NOT_SUPPORTED);
@@ -2306,10 +2388,11 @@ void sm5714_usbpd_protocol_rx(struct sm5714_usbpd_data *pd_data)
 				pdic_data->status_reg |= BITMSG(MSG_GET_SRC_INFO);
 				break;
 			case USBPD_Get_Revision:
-				pdic_data->status_reg |= BITMSG(MSG_NOT_SUPPORTED);
+				pdic_data->status_reg |= BITMSG(MSG_GET_REVISION);
 				break;
 			case 25 ... 31:
 				pdic_data->status_reg |= BITMSG(MSG_RESERVED);
+				break;
 			default:
 				break;
 			}
@@ -2646,6 +2729,9 @@ int sm5714_usbpd_init(struct device *dev, void *phy_driver_data)
 	pd_data->pd_noti.sink_status.has_apdo = false;
 	pd_data->thermal_state = 0;
 	pd_data->auth_type = AUTH_NONE;
+#ifndef CONFIG_DISABLE_LOCKSCREEN_USB_RESTRICTION
+	pd_data->altmode_enable = 0;
+#endif
 
 #if IS_ENABLED(CONFIG_PDIC_PD30)
 	pd_data->specification_revision = USBPD_REV_30;
